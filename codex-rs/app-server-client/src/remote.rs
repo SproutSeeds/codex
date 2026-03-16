@@ -36,6 +36,7 @@ use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::Result as JsonRpcResult;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
+use codex_app_server_protocol::WEBSOCKET_AUTH_TOKEN_HEADER;
 use futures::SinkExt;
 use futures::StreamExt;
 use serde::de::DeserializeOwned;
@@ -47,6 +48,8 @@ use tokio_tungstenite::MaybeTlsStream;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tracing::warn;
 use url::Url;
 
@@ -56,6 +59,7 @@ const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Debug, Clone)]
 pub struct RemoteAppServerConnectArgs {
     pub websocket_url: String,
+    pub auth_token: Option<String>,
     pub client_name: String,
     pub client_version: String,
     pub experimental_api: bool,
@@ -131,7 +135,24 @@ impl RemoteAppServerClient {
                 format!("invalid websocket URL `{websocket_url}`: {err}"),
             )
         })?;
-        let stream = timeout(CONNECT_TIMEOUT, connect_async(url.as_str()))
+        let mut request = url.as_str().into_client_request().map_err(|err| {
+            IoError::new(
+                ErrorKind::InvalidInput,
+                format!("invalid websocket URL `{websocket_url}`: {err}"),
+            )
+        })?;
+        if let Some(auth_token) = args.auth_token.as_deref() {
+            let header_value = HeaderValue::from_str(auth_token).map_err(|err| {
+                IoError::new(
+                    ErrorKind::InvalidInput,
+                    format!("invalid remote auth token header value: {err}"),
+                )
+            })?;
+            request
+                .headers_mut()
+                .insert(WEBSOCKET_AUTH_TOKEN_HEADER, header_value);
+        }
+        let stream = timeout(CONNECT_TIMEOUT, connect_async(request))
             .await
             .map_err(|_| {
                 IoError::new(

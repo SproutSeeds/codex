@@ -336,6 +336,7 @@ pub async fn run_main(
         loader_overrides,
         default_analytics_enabled,
         AppServerTransport::Stdio,
+        None,
     )
     .await
 }
@@ -346,6 +347,7 @@ pub async fn run_main_with_transport(
     loader_overrides: LoaderOverrides,
     default_analytics_enabled: bool,
     transport: AppServerTransport,
+    websocket_auth_token: Option<String>,
 ) -> IoResult<()> {
     let (transport_event_tx, mut transport_event_rx) =
         mpsc::channel::<TransportEvent>(CHANNEL_CAPACITY);
@@ -364,6 +366,12 @@ pub async fn run_main_with_transport(
     let mut stdio_handles = Vec::<JoinHandle<()>>::new();
     let transport_runtime = match transport {
         AppServerTransport::Stdio => {
+            if websocket_auth_token.is_some() {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "`--auth-token` is only supported with `--listen ws://IP:PORT`",
+                ));
+            }
             start_stdio_connection(transport_event_tx.clone(), &mut stdio_handles).await?;
             TransportRuntime::Stdio
         }
@@ -371,6 +379,7 @@ pub async fn run_main_with_transport(
             let shutdown_token = CancellationToken::new();
             let accept_handle = start_websocket_acceptor(
                 bind_address,
+                websocket_auth_token,
                 transport_event_tx.clone(),
                 shutdown_token.clone(),
             )

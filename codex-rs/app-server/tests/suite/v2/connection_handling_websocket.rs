@@ -10,6 +10,7 @@ use codex_app_server_protocol::JSONRPCNotification;
 use codex_app_server_protocol::JSONRPCRequest;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::WEBSOCKET_AUTH_TOKEN_HEADER;
 use futures::SinkExt;
 use futures::StreamExt;
 use reqwest::StatusCode;
@@ -29,7 +30,10 @@ use tokio::time::timeout;
 use tokio_tungstenite::MaybeTlsStream;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Error as WebSocketError;
 use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 
 pub(super) const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -107,17 +111,91 @@ async fn websocket_transport_serves_health_endpoints_on_same_listener() -> Resul
     Ok(())
 }
 
+#[tokio::test]
+async fn websocket_transport_explicit_auth_rejects_missing_or_wrong_token() -> Result<()> {
+    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri(), "never")?;
+
+    let (mut process, bind_addr, _generated_auth_token) = spawn_websocket_server_with_options(
+        codex_home.path(),
+        "ws://127.0.0.1:0",
+        Some("expected-token"),
+    )
+    .await?;
+    let client = reqwest::Client::new();
+
+    let readyz = http_get(&client, bind_addr, "/readyz").await?;
+    assert_eq!(readyz.status(), StatusCode::OK);
+    let healthz = http_get(&client, bind_addr, "/healthz").await?;
+    assert_eq!(healthz.status(), StatusCode::OK);
+
+    expect_websocket_unauthorized(bind_addr, None).await?;
+    expect_websocket_unauthorized(bind_addr, Some("wrong-token")).await?;
+
+    let mut ws = connect_websocket_with_token(bind_addr, Some("expected-token")).await?;
+    send_initialize_request(&mut ws, 1, "ws_auth_client").await?;
+    let init = read_response_for_id(&mut ws, 1).await?;
+    assert_eq!(init.id, RequestId::Integer(1));
+
+    process
+        .kill()
+        .await
+        .context("failed to stop websocket app-server process")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn websocket_transport_non_loopback_bind_generates_required_auth_token() -> Result<()> {
+    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri(), "never")?;
+
+    let (mut process, bind_addr, generated_auth_token) =
+        spawn_websocket_server_with_options(codex_home.path(), "ws://0.0.0.0:0", None).await?;
+    let connect_addr = SocketAddr::from(([127, 0, 0, 1], bind_addr.port()));
+    let generated_auth_token =
+        generated_auth_token.context("expected generated websocket auth token")?;
+
+    expect_websocket_unauthorized(connect_addr, None).await?;
+    expect_websocket_unauthorized(connect_addr, Some("wrong-token")).await?;
+
+    let mut ws = connect_websocket_with_token(connect_addr, Some(&generated_auth_token)).await?;
+    send_initialize_request(&mut ws, 1, "ws_generated_auth_client").await?;
+    let init = read_response_for_id(&mut ws, 1).await?;
+    assert_eq!(init.id, RequestId::Integer(1));
+
+    process
+        .kill()
+        .await
+        .context("failed to stop websocket app-server process")?;
+    Ok(())
+}
+
 pub(super) async fn spawn_websocket_server(codex_home: &Path) -> Result<(Child, SocketAddr)> {
+    let (process, bind_addr, _generated_auth_token) =
+        spawn_websocket_server_with_options(codex_home, "ws://127.0.0.1:0", None).await?;
+    Ok((process, bind_addr))
+}
+
+pub(super) async fn spawn_websocket_server_with_options(
+    codex_home: &Path,
+    listen_url: &str,
+    auth_token: Option<&str>,
+) -> Result<(Child, SocketAddr, Option<String>)> {
     let program = codex_utils_cargo_bin::cargo_bin("codex-app-server")
         .context("should find app-server binary")?;
     let mut cmd = Command::new(program);
     cmd.arg("--listen")
-        .arg("ws://127.0.0.1:0")
+        .arg(listen_url)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .env("CODEX_HOME", codex_home)
         .env("RUST_LOG", "debug");
+    if let Some(auth_token) = auth_token {
+        cmd.arg("--auth-token").arg(auth_token);
+    }
     let mut process = cmd
         .kill_on_drop(true)
         .spawn()
@@ -129,6 +207,8 @@ pub(super) async fn spawn_websocket_server(codex_home: &Path) -> Result<(Child, 
         .context("failed to capture websocket app-server stderr")?;
     let mut stderr_reader = BufReader::new(stderr).lines();
     let deadline = Instant::now() + Duration::from_secs(10);
+    let mut generated_auth_token = None;
+    let mut bind_addr = None;
     let bind_addr = loop {
         let line = timeout(
             deadline.saturating_duration_since(Instant::now()),
@@ -158,10 +238,22 @@ pub(super) async fn spawn_websocket_server(codex_home: &Path) -> Result<(Child, 
             stripped
         };
 
-        if let Some(bind_addr) = stripped_line
-            .split_whitespace()
-            .find_map(|token| token.strip_prefix("ws://"))
-            .and_then(|addr| addr.parse::<SocketAddr>().ok())
+        if generated_auth_token.is_none()
+            && let Some((_, token)) = stripped_line.split_once("--remote-auth-token ")
+        {
+            generated_auth_token = token.split_whitespace().next().map(str::to_owned);
+        }
+
+        if bind_addr.is_none() {
+            bind_addr = stripped_line
+                .split_whitespace()
+                .find_map(|token| token.strip_prefix("ws://"))
+                .and_then(|addr| addr.parse::<SocketAddr>().ok());
+        }
+        let expects_generated_auth_token =
+            auth_token.is_none() && bind_addr.is_some_and(|addr| !addr.ip().is_loopback());
+        if let Some(bind_addr) = bind_addr
+            && (!expects_generated_auth_token || generated_auth_token.is_some())
         {
             break bind_addr;
         }
@@ -173,23 +265,75 @@ pub(super) async fn spawn_websocket_server(codex_home: &Path) -> Result<(Child, 
         }
     });
 
-    Ok((process, bind_addr))
+    Ok((process, bind_addr, generated_auth_token))
 }
 
 pub(super) async fn connect_websocket(bind_addr: SocketAddr) -> Result<WsClient> {
+    connect_websocket_with_token(bind_addr, None).await
+}
+
+pub(super) async fn connect_websocket_with_token(
+    bind_addr: SocketAddr,
+    auth_token: Option<&str>,
+) -> Result<WsClient> {
     let url = format!("ws://{bind_addr}");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        match connect_async(&url).await {
-            Ok((stream, _response)) => return Ok(stream),
+        match connect_websocket_request(&url, auth_token) {
+            Ok(request) => match connect_async(request).await {
+                Ok((stream, _response)) => return Ok(stream),
+                Err(err) => {
+                    if matches!(err, WebSocketError::Http(_)) || Instant::now() >= deadline {
+                        bail!("failed to connect websocket to {url}: {err}");
+                    }
+                    sleep(Duration::from_millis(50)).await;
+                }
+            },
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+pub(super) async fn expect_websocket_unauthorized(
+    bind_addr: SocketAddr,
+    auth_token: Option<&str>,
+) -> Result<()> {
+    let url = format!("ws://{bind_addr}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let request = connect_websocket_request(&url, auth_token)?;
+        match connect_async(request).await {
+            Ok(_) => bail!("expected websocket auth failure for {url}"),
+            Err(WebSocketError::Http(response)) => {
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+                return Ok(());
+            }
             Err(err) => {
                 if Instant::now() >= deadline {
-                    bail!("failed to connect websocket to {url}: {err}");
+                    return Err(anyhow::Error::new(err)).with_context(|| {
+                        format!("expected unauthorized websocket response from {url}")
+                    });
                 }
                 sleep(Duration::from_millis(50)).await;
             }
         }
     }
+}
+
+fn connect_websocket_request(
+    url: &str,
+    auth_token: Option<&str>,
+) -> Result<tokio_tungstenite::tungstenite::http::Request<()>> {
+    let mut request = url
+        .into_client_request()
+        .context("websocket request should be valid")?;
+    if let Some(auth_token) = auth_token {
+        request.headers_mut().insert(
+            WEBSOCKET_AUTH_TOKEN_HEADER,
+            HeaderValue::from_str(auth_token).context("websocket auth token should be valid")?,
+        );
+    }
+    Ok(request)
 }
 
 async fn http_get(

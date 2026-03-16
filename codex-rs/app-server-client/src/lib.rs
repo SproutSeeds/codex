@@ -856,6 +856,7 @@ mod tests {
     use codex_app_server_protocol::ThreadStartResponse;
     use codex_app_server_protocol::ToolRequestUserInputParams;
     use codex_app_server_protocol::ToolRequestUserInputQuestion;
+    use codex_app_server_protocol::WEBSOCKET_AUTH_TOKEN_HEADER;
     use codex_core::AuthManager;
     use codex_core::ThreadManager;
     use codex_core::config::ConfigBuilder;
@@ -865,8 +866,10 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio::time::Duration;
     use tokio::time::timeout;
-    use tokio_tungstenite::accept_async;
+    use tokio_tungstenite::accept_hdr_async;
     use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::handshake::server::Request as WebSocketRequest;
+    use tokio_tungstenite::tungstenite::handshake::server::Response as WebSocketResponse;
 
     async fn build_test_config() -> Config {
         match ConfigBuilder::default().build().await {
@@ -911,15 +914,39 @@ mod tests {
             + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
+        start_test_remote_server_with_auth(None, handler).await
+    }
+
+    async fn start_test_remote_server_with_auth<F, Fut>(
+        expected_auth_token: Option<String>,
+        handler: F,
+    ) -> String
+    where
+        F: FnOnce(tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>) -> Fut
+            + Send
+            + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
         let addr = listener.local_addr().expect("listener address");
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept should succeed");
-            let websocket = accept_async(stream)
-                .await
-                .expect("websocket upgrade should succeed");
+            let websocket = accept_hdr_async(
+                stream,
+                move |request: &WebSocketRequest, response: WebSocketResponse| {
+                    let provided_auth_token = request
+                        .headers()
+                        .get(WEBSOCKET_AUTH_TOKEN_HEADER)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned);
+                    assert_eq!(provided_auth_token, expected_auth_token);
+                    Ok(response)
+                },
+            )
+            .await
+            .expect("websocket upgrade should succeed");
             handler(websocket).await;
         });
         format!("ws://{addr}")
@@ -987,6 +1014,7 @@ mod tests {
     fn test_remote_connect_args(websocket_url: String) -> RemoteAppServerConnectArgs {
         RemoteAppServerConnectArgs {
             websocket_url,
+            auth_token: None,
             client_name: "codex-app-server-client-test".to_string(),
             client_version: "0.0.0-test".to_string(),
             experimental_api: true,
@@ -1129,6 +1157,27 @@ mod tests {
             .await
             .expect("typed request should succeed");
         assert_eq!(response.account, None);
+
+        client.shutdown().await.expect("shutdown should complete");
+    }
+
+    #[tokio::test]
+    async fn remote_connect_includes_auth_header_when_configured() {
+        let auth_token = "pairing-token".to_string();
+        let websocket_url = start_test_remote_server_with_auth(
+            Some(auth_token.clone()),
+            |mut websocket| async move {
+                expect_remote_initialize(&mut websocket).await;
+                websocket.close(None).await.expect("close should succeed");
+            },
+        )
+        .await;
+        let client = RemoteAppServerClient::connect(RemoteAppServerConnectArgs {
+            auth_token: Some(auth_token),
+            ..test_remote_connect_args(websocket_url)
+        })
+        .await
+        .expect("remote client should connect");
 
         client.shutdown().await.expect("shutdown should complete");
     }

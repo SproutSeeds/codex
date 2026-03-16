@@ -92,6 +92,7 @@ fn main() -> anyhow::Result<()> {
                     arg0_paths,
                     codex_core::config_loader::LoaderOverrides::default(),
                     None,
+                    None,
                 )
                 .await?,
             )

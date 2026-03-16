@@ -10,6 +10,7 @@ use axum::extract::State;
 use axum::extract::ws::Message as WebSocketMessage;
 use axum::extract::ws::WebSocket;
 use axum::extract::ws::WebSocketUpgrade;
+use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::any;
@@ -17,6 +18,7 @@ use axum::routing::get;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::ServerRequest;
+use codex_app_server_protocol::WEBSOCKET_AUTH_TOKEN_HEADER;
 use futures::SinkExt;
 use futures::StreamExt;
 use owo_colors::OwoColorize;
@@ -45,6 +47,7 @@ use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
+use uuid::Uuid;
 
 /// Size of the bounded channels used to communicate between tasks. The value
 /// is a balance between throughput and memory usage - 128 messages should be
@@ -56,8 +59,63 @@ fn colorize(text: &str, style: Style) -> String {
         .to_string()
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum WebSocketAuthSource {
+    Configured,
+    Generated,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct WebSocketAuthConfig {
+    token: Arc<str>,
+    source: WebSocketAuthSource,
+}
+
+impl WebSocketAuthConfig {
+    fn from_bind_address_and_token(
+        bind_address: SocketAddr,
+        auth_token: Option<String>,
+    ) -> IoResult<Option<Self>> {
+        match auth_token {
+            Some(token) => {
+                if token.trim().is_empty() {
+                    return Err(std::io::Error::new(
+                        ErrorKind::InvalidInput,
+                        "`--auth-token` must not be empty",
+                    ));
+                }
+                Ok(Some(Self {
+                    token: token.into(),
+                    source: WebSocketAuthSource::Configured,
+                }))
+            }
+            None if bind_address.ip().is_loopback() => Ok(None),
+            None => Ok(Some(Self {
+                token: generate_pairing_token().into(),
+                source: WebSocketAuthSource::Generated,
+            })),
+        }
+    }
+
+    fn token(&self) -> &str {
+        self.token.as_ref()
+    }
+}
+
+fn generate_pairing_token() -> String {
+    format!("{}{}", Uuid::now_v7().simple(), Uuid::now_v7().simple())
+}
+
+fn websocket_connect_target(addr: SocketAddr) -> String {
+    if addr.ip().is_unspecified() {
+        format!("ws://HOST:{}", addr.port())
+    } else {
+        format!("ws://{addr}")
+    }
+}
+
 #[allow(clippy::print_stderr)]
-fn print_websocket_startup_banner(addr: SocketAddr) {
+fn print_websocket_startup_banner(addr: SocketAddr, auth: Option<&WebSocketAuthConfig>) {
     let title = colorize("codex app-server (WebSockets)", Style::new().bold().cyan());
     let listening_label = colorize("listening on:", Style::new().dimmed());
     let listen_url = colorize(&format!("ws://{addr}"), Style::new().green());
@@ -70,14 +128,35 @@ fn print_websocket_startup_banner(addr: SocketAddr) {
     eprintln!("  {listening_label} {listen_url}");
     eprintln!("  {ready_label} {ready_url}");
     eprintln!("  {health_label} {health_url}");
+    if let Some(auth) = auth {
+        let auth_label = colorize("auth:", Style::new().dimmed());
+        eprintln!(
+            "  {auth_label} {}",
+            colorize("required for websocket clients", Style::new().yellow())
+        );
+        if auth.source == WebSocketAuthSource::Generated {
+            let connect_label = colorize("connect:", Style::new().dimmed());
+            let connect_example = format!(
+                "codex --remote {} --remote-auth-token {}",
+                websocket_connect_target(addr),
+                auth.token()
+            );
+            eprintln!(
+                "  {connect_label} {}",
+                colorize(&connect_example, Style::new().green())
+            );
+        }
+    }
     if addr.ip().is_loopback() {
-        eprintln!(
-            "  {note_label} binds localhost only (use SSH port-forwarding for remote access)"
-        );
+        if auth.is_some() {
+            eprintln!("  {note_label} binds localhost only and requires the pairing token");
+        } else {
+            eprintln!(
+                "  {note_label} binds localhost only (use SSH port-forwarding for remote access)"
+            );
+        }
     } else {
-        eprintln!(
-            "  {note_label} this is a raw WS server; consider running behind TLS/auth for real remote use"
-        );
+        eprintln!("  {note_label} this is a raw WS server; use TLS for production exposure");
     }
 }
 
@@ -85,6 +164,7 @@ fn print_websocket_startup_banner(addr: SocketAddr) {
 struct WebSocketListenerState {
     transport_event_tx: mpsc::Sender<TransportEvent>,
     connection_counter: Arc<AtomicU64>,
+    auth: Option<WebSocketAuthConfig>,
 }
 
 async fn health_check_handler() -> StatusCode {
@@ -94,8 +174,18 @@ async fn health_check_handler() -> StatusCode {
 async fn websocket_upgrade_handler(
     websocket: WebSocketUpgrade,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     State(state): State<WebSocketListenerState>,
 ) -> impl IntoResponse {
+    if let Some(auth) = &state.auth {
+        let provided_token = headers
+            .get(WEBSOCKET_AUTH_TOKEN_HEADER)
+            .and_then(|value| value.to_str().ok());
+        if provided_token != Some(auth.token()) {
+            warn!(%peer_addr, "websocket client rejected by auth");
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+    }
     let connection_id = ConnectionId(state.connection_counter.fetch_add(1, Ordering::Relaxed));
     info!(%peer_addr, "websocket client connected");
     websocket.on_upgrade(move |stream| async move {
@@ -310,12 +400,14 @@ pub(crate) async fn start_stdio_connection(
 
 pub(crate) async fn start_websocket_acceptor(
     bind_address: SocketAddr,
+    auth_token: Option<String>,
     transport_event_tx: mpsc::Sender<TransportEvent>,
     shutdown_token: CancellationToken,
 ) -> IoResult<JoinHandle<()>> {
     let listener = TcpListener::bind(bind_address).await?;
     let local_addr = listener.local_addr()?;
-    print_websocket_startup_banner(local_addr);
+    let auth = WebSocketAuthConfig::from_bind_address_and_token(local_addr, auth_token)?;
+    print_websocket_startup_banner(local_addr, auth.as_ref());
     info!("app-server websocket listening on ws://{local_addr}");
 
     let router = Router::new()
@@ -325,6 +417,7 @@ pub(crate) async fn start_websocket_acceptor(
         .with_state(WebSocketListenerState {
             transport_event_tx,
             connection_counter: Arc::new(AtomicU64::new(1)),
+            auth,
         });
     let server = axum::serve(
         listener,
@@ -744,6 +837,54 @@ mod tests {
             err.to_string(),
             "unsupported --listen URL `http://127.0.0.1:1234`; expected `stdio://` or `ws://IP:PORT`"
         );
+    }
+
+    #[test]
+    fn websocket_auth_is_optional_for_loopback_bindings() {
+        let auth = WebSocketAuthConfig::from_bind_address_and_token(
+            "127.0.0.1:1234".parse().expect("valid loopback socket"),
+            None,
+        )
+        .expect("loopback websocket auth should resolve");
+        assert_eq!(auth, None);
+    }
+
+    #[test]
+    fn websocket_auth_defaults_to_generated_token_for_non_loopback_bindings() {
+        let auth = WebSocketAuthConfig::from_bind_address_and_token(
+            "0.0.0.0:1234".parse().expect("valid socket"),
+            None,
+        )
+        .expect("non-loopback websocket auth should resolve")
+        .expect("non-loopback binds should generate a token");
+        assert_eq!(auth.source, WebSocketAuthSource::Generated);
+        assert!(
+            auth.token().len() >= 64,
+            "generated token should be shell-safe and high entropy"
+        );
+    }
+
+    #[test]
+    fn websocket_auth_uses_explicit_token_when_provided() {
+        let auth = WebSocketAuthConfig::from_bind_address_and_token(
+            "127.0.0.1:1234".parse().expect("valid loopback socket"),
+            Some("test-token".to_string()),
+        )
+        .expect("explicit websocket auth should resolve")
+        .expect("explicit token should enable auth");
+        assert_eq!(auth.source, WebSocketAuthSource::Configured);
+        assert_eq!(auth.token(), "test-token");
+    }
+
+    #[test]
+    fn websocket_auth_rejects_empty_explicit_token() {
+        let err = WebSocketAuthConfig::from_bind_address_and_token(
+            "127.0.0.1:1234".parse().expect("valid loopback socket"),
+            Some("   ".to_string()),
+        )
+        .expect_err("empty explicit token should be rejected");
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert_eq!(err.to_string(), "`--auth-token` must not be empty");
     }
 
     #[tokio::test]

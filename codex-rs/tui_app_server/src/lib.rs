@@ -265,7 +265,10 @@ async fn start_embedded_app_server(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum AppServerTarget {
     Embedded,
-    Remote(String),
+    Remote {
+        websocket_url: String,
+        auth_token: Option<String>,
+    },
 }
 
 fn remote_addr_has_explicit_port(addr: &str, parsed: &Url) -> bool {
@@ -321,9 +324,13 @@ pub fn normalize_remote_addr(addr: &str) -> color_eyre::Result<String> {
     );
 }
 
-async fn connect_remote_app_server(websocket_url: String) -> color_eyre::Result<AppServerClient> {
+async fn connect_remote_app_server(
+    websocket_url: String,
+    auth_token: Option<String>,
+) -> color_eyre::Result<AppServerClient> {
     let app_server = RemoteAppServerClient::connect(RemoteAppServerConnectArgs {
         websocket_url,
+        auth_token,
         client_name: "codex-tui".to_string(),
         client_version: env!("CARGO_PKG_VERSION").to_string(),
         experimental_api: true,
@@ -355,9 +362,10 @@ async fn start_app_server(
         )
         .await
         .map(AppServerClient::InProcess),
-        AppServerTarget::Remote(websocket_url) => {
-            connect_remote_app_server(websocket_url.clone()).await
-        }
+        AppServerTarget::Remote {
+            websocket_url,
+            auth_token,
+        } => connect_remote_app_server(websocket_url.clone(), auth_token.clone()).await,
     }
 }
 
@@ -568,11 +576,15 @@ pub async fn run_main(
     arg0_paths: Arg0DispatchPaths,
     loader_overrides: LoaderOverrides,
     remote: Option<String>,
+    remote_auth_token: Option<String>,
 ) -> std::io::Result<AppExitInfo> {
     let remote_url = remote;
     let app_server_target = remote_url
         .clone()
-        .map(AppServerTarget::Remote)
+        .map(|websocket_url| AppServerTarget::Remote {
+            websocket_url,
+            auth_token: remote_auth_token.clone(),
+        })
         .unwrap_or(AppServerTarget::Embedded);
     let (sandbox_mode, approval_policy) = if cli.full_auto {
         (
@@ -872,6 +884,7 @@ pub async fn run_main(
         cloud_requirements,
         feedback,
         remote_url,
+        remote_auth_token,
     )
     .await
     .map_err(|err| std::io::Error::other(err.to_string()))
@@ -889,8 +902,9 @@ async fn run_ratatui_app(
     mut cloud_requirements: CloudRequirementsLoader,
     feedback: codex_feedback::CodexFeedback,
     remote_url: Option<String>,
+    remote_auth_token: Option<String>,
 ) -> color_eyre::Result<AppExitInfo> {
-    let remote_mode = matches!(&app_server_target, AppServerTarget::Remote(_));
+    let remote_mode = matches!(&app_server_target, AppServerTarget::Remote { .. });
     color_eyre::install()?;
 
     tooltips::announcement::prewarm();
@@ -1289,6 +1303,7 @@ async fn run_ratatui_app(
         should_show_trust_screen, // Proxy to: is it a first run in this directory?
         should_prompt_windows_sandbox_nux_at_startup,
         remote_url,
+        remote_auth_token,
     )
     .await;
 
