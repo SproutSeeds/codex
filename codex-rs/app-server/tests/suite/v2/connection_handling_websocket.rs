@@ -2,6 +2,8 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::InitializeParams;
 use codex_app_server_protocol::JSONRPCError;
@@ -12,12 +14,16 @@ use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use futures::SinkExt;
 use futures::StreamExt;
+use hmac::Hmac;
+use hmac::Mac;
 use reqwest::StatusCode;
 use serde_json::json;
+use sha2::Sha256;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::process::Stdio;
 use tempfile::TempDir;
+use time::OffsetDateTime;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::BufReader;
 use tokio::process::Child;
@@ -29,11 +35,16 @@ use tokio::time::timeout;
 use tokio_tungstenite::MaybeTlsStream;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Error as WsError;
 use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
+use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 
 pub(super) const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(super) type WsClient = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+type HmacSha256 = Hmac<Sha256>;
 
 #[tokio::test]
 async fn websocket_transport_routes_per_connection_handshake_and_responses() -> Result<()> {
@@ -107,12 +118,147 @@ async fn websocket_transport_serves_health_endpoints_on_same_listener() -> Resul
     Ok(())
 }
 
+#[tokio::test]
+async fn websocket_transport_rejects_missing_and_invalid_capability_tokens() -> Result<()> {
+    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
+    let codex_home = TempDir::new()?;
+    let token_file = codex_home.path().join("app-server-token");
+    std::fs::write(&token_file, "super-secret-token\n")?;
+    create_config_toml(codex_home.path(), &server.uri(), "never")?;
+    let auth_args = vec![
+        "--ws-auth".to_string(),
+        "capability-token".to_string(),
+        "--ws-token-file".to_string(),
+        token_file.display().to_string(),
+    ];
+
+    let (mut process, bind_addr) =
+        spawn_websocket_server_with_args(codex_home.path(), "ws://127.0.0.1:0", &auth_args).await?;
+
+    assert_websocket_connect_rejected(bind_addr, None).await?;
+    assert_websocket_connect_rejected(bind_addr, Some("wrong-token")).await?;
+
+    let mut ws = connect_websocket_with_bearer(bind_addr, Some("super-secret-token")).await?;
+    send_initialize_request(&mut ws, 1, "ws_auth_client").await?;
+    let init = read_response_for_id(&mut ws, 1).await?;
+    assert_eq!(init.id, RequestId::Integer(1));
+
+    process
+        .kill()
+        .await
+        .context("failed to stop websocket app-server process")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn websocket_transport_verifies_signed_short_lived_bearer_tokens() -> Result<()> {
+    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
+    let codex_home = TempDir::new()?;
+    let shared_secret_file = codex_home.path().join("app-server-signing-secret");
+    std::fs::write(&shared_secret_file, "signed-secret\n")?;
+    create_config_toml(codex_home.path(), &server.uri(), "never")?;
+    let auth_args = vec![
+        "--ws-auth".to_string(),
+        "signed-bearer-token".to_string(),
+        "--ws-shared-secret-file".to_string(),
+        shared_secret_file.display().to_string(),
+        "--ws-issuer".to_string(),
+        "codex-enroller".to_string(),
+        "--ws-audience".to_string(),
+        "codex-app-server".to_string(),
+        "--ws-max-clock-skew-seconds".to_string(),
+        "1".to_string(),
+    ];
+
+    let (mut process, bind_addr) =
+        spawn_websocket_server_with_args(codex_home.path(), "ws://127.0.0.1:0", &auth_args).await?;
+    let expired_token = signed_bearer_token(
+        b"signed-secret",
+        json!({
+            "exp": OffsetDateTime::now_utc().unix_timestamp() - 30,
+            "iss": "codex-enroller",
+            "aud": "codex-app-server",
+        }),
+    )?;
+    assert_websocket_connect_rejected(bind_addr, Some(expired_token.as_str())).await?;
+
+    let valid_token = signed_bearer_token(
+        b"signed-secret",
+        json!({
+            "exp": OffsetDateTime::now_utc().unix_timestamp() + 60,
+            "iss": "codex-enroller",
+            "aud": "codex-app-server",
+        }),
+    )?;
+    let mut ws = connect_websocket_with_bearer(bind_addr, Some(valid_token.as_str())).await?;
+    send_initialize_request(&mut ws, 1, "ws_signed_auth_client").await?;
+    let init = read_response_for_id(&mut ws, 1).await?;
+    assert_eq!(init.id, RequestId::Integer(1));
+
+    process
+        .kill()
+        .await
+        .context("failed to stop websocket app-server process")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn websocket_transport_blocks_unauthenticated_non_loopback_startup() -> Result<()> {
+    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri(), "never")?;
+
+    let output = run_websocket_server_to_completion(codex_home.path(), "ws://0.0.0.0:0").await?;
+    assert!(
+        !output.status.success(),
+        "non-loopback websocket server should fail without auth"
+    );
+    let stderr = String::from_utf8(output.stderr).context("stderr should be valid utf-8")?;
+    assert!(
+        stderr.contains("non-loopback websocket listeners require websocket auth flags"),
+        "unexpected stderr: {stderr}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn websocket_transport_allows_explicit_insecure_non_loopback_startup() -> Result<()> {
+    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri(), "never")?;
+    let args = vec!["--allow-unauthenticated-non-loopback-ws".to_string()];
+
+    let (mut process, bind_addr) =
+        spawn_websocket_server_with_args(codex_home.path(), "ws://0.0.0.0:0", &args).await?;
+
+    let mut ws = connect_websocket(bind_addr).await?;
+    send_initialize_request(&mut ws, 1, "ws_insecure_override_client").await?;
+    let init = read_response_for_id(&mut ws, 1).await?;
+    assert_eq!(init.id, RequestId::Integer(1));
+
+    process
+        .kill()
+        .await
+        .context("failed to stop websocket app-server process")?;
+    Ok(())
+}
+
 pub(super) async fn spawn_websocket_server(codex_home: &Path) -> Result<(Child, SocketAddr)> {
+    spawn_websocket_server_with_args(codex_home, "ws://127.0.0.1:0", &[]).await
+}
+
+pub(super) async fn spawn_websocket_server_with_args(
+    codex_home: &Path,
+    listen_url: &str,
+    extra_args: &[String],
+) -> Result<(Child, SocketAddr)> {
     let program = codex_utils_cargo_bin::cargo_bin("codex-app-server")
         .context("should find app-server binary")?;
     let mut cmd = Command::new(program);
     cmd.arg("--listen")
-        .arg("ws://127.0.0.1:0")
+        .arg(listen_url)
+        .args(extra_args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -177,10 +323,18 @@ pub(super) async fn spawn_websocket_server(codex_home: &Path) -> Result<(Child, 
 }
 
 pub(super) async fn connect_websocket(bind_addr: SocketAddr) -> Result<WsClient> {
-    let url = format!("ws://{bind_addr}");
+    connect_websocket_with_bearer(bind_addr, None).await
+}
+
+pub(super) async fn connect_websocket_with_bearer(
+    bind_addr: SocketAddr,
+    bearer_token: Option<&str>,
+) -> Result<WsClient> {
+    let url = format!("ws://{}", connectable_bind_addr(bind_addr));
+    let request = websocket_request(url.as_str(), bearer_token)?;
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        match connect_async(&url).await {
+        match connect_async(request.clone()).await {
             Ok((stream, _response)) => return Ok(stream),
             Err(err) => {
                 if Instant::now() >= deadline {
@@ -192,28 +346,88 @@ pub(super) async fn connect_websocket(bind_addr: SocketAddr) -> Result<WsClient>
     }
 }
 
+async fn assert_websocket_connect_rejected(
+    bind_addr: SocketAddr,
+    bearer_token: Option<&str>,
+) -> Result<()> {
+    let url = format!("ws://{}", connectable_bind_addr(bind_addr));
+    let request = websocket_request(url.as_str(), bearer_token)?;
+
+    match connect_async(request).await {
+        Ok((_stream, response)) => {
+            bail!(
+                "expected websocket handshake rejection, got {}",
+                response.status()
+            )
+        }
+        Err(WsError::Http(response)) => {
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            Ok(())
+        }
+        Err(err) => bail!("expected http rejection during websocket handshake: {err}"),
+    }
+}
+
+async fn run_websocket_server_to_completion(
+    codex_home: &Path,
+    listen_url: &str,
+) -> Result<std::process::Output> {
+    let program = codex_utils_cargo_bin::cargo_bin("codex-app-server")
+        .context("should find app-server binary")?;
+    let mut cmd = Command::new(program);
+    cmd.arg("--listen")
+        .arg(listen_url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .env("CODEX_HOME", codex_home)
+        .env("RUST_LOG", "debug");
+    timeout(Duration::from_secs(10), cmd.output())
+        .await
+        .context("timed out waiting for websocket app-server to exit")?
+        .context("failed to run websocket app-server")
+}
+
 async fn http_get(
     client: &reqwest::Client,
     bind_addr: SocketAddr,
     path: &str,
 ) -> Result<reqwest::Response> {
+    let connectable_bind_addr = connectable_bind_addr(bind_addr);
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match client
-            .get(format!("http://{bind_addr}{path}"))
+            .get(format!("http://{connectable_bind_addr}{path}"))
             .send()
             .await
-            .with_context(|| format!("failed to GET http://{bind_addr}{path}"))
+            .with_context(|| format!("failed to GET http://{connectable_bind_addr}{path}"))
         {
             Ok(response) => return Ok(response),
             Err(err) => {
                 if Instant::now() >= deadline {
-                    bail!("failed to GET http://{bind_addr}{path}: {err}");
+                    bail!("failed to GET http://{connectable_bind_addr}{path}: {err}");
                 }
                 sleep(Duration::from_millis(50)).await;
             }
         }
     }
+}
+
+fn websocket_request(
+    url: &str,
+    bearer_token: Option<&str>,
+) -> Result<tokio_tungstenite::tungstenite::http::Request<()>> {
+    let mut request = url
+        .into_client_request()
+        .context("failed to create websocket request")?;
+    if let Some(bearer_token) = bearer_token {
+        request.headers_mut().insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {bearer_token}"))
+                .context("invalid bearer token header")?,
+        );
+    }
+    Ok(request)
 }
 
 pub(super) async fn send_initialize_request(
@@ -405,4 +619,25 @@ stream_max_retries = 0
 "#
         ),
     )
+}
+
+fn connectable_bind_addr(bind_addr: SocketAddr) -> SocketAddr {
+    match bind_addr {
+        SocketAddr::V4(addr) if addr.ip().is_unspecified() => {
+            SocketAddr::from(([127, 0, 0, 1], addr.port()))
+        }
+        SocketAddr::V6(addr) if addr.ip().is_unspecified() => {
+            SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], addr.port()))
+        }
+        _ => bind_addr,
+    }
+}
+
+fn signed_bearer_token(shared_secret: &[u8], claims: serde_json::Value) -> Result<String> {
+    let claims_segment = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims)?);
+    let payload = format!("codexv1.{claims_segment}");
+    let mut mac = HmacSha256::new_from_slice(shared_secret).context("failed to create hmac")?;
+    mac.update(payload.as_bytes());
+    let signature = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+    Ok(format!("{payload}.{signature}"))
 }
