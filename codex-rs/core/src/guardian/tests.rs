@@ -1,10 +1,10 @@
 use super::*;
 use crate::codex::Session;
 use crate::codex::TurnContext;
-use crate::config::Constrained;
 use crate::config::Config;
 use crate::config::ConfigOverrides;
 use crate::config::ConfigToml;
+use crate::config::Constrained;
 use crate::config::ManagedFeatures;
 use crate::config::NetworkProxySpec;
 use crate::config::test_config;
@@ -49,7 +49,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
-use toml::Value as TomlValue;
 
 async fn guardian_test_session_and_turn(
     server: &wiremock::MockServer,
