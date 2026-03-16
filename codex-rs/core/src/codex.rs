@@ -5,6 +5,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::time::Instant;
 
 use crate::AuthManager;
 use crate::CodexAuth;
@@ -105,7 +106,6 @@ use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnContextNetworkItem;
-use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::W3cTraceContext;
 use codex_protocol::request_permissions::PermissionGrantScope;
 use codex_protocol::request_permissions::RequestPermissionProfile;
@@ -290,6 +290,7 @@ use crate::tasks::RegularTask;
 use crate::tasks::ReviewTask;
 use crate::tasks::SessionTask;
 use crate::tasks::SessionTaskContext;
+use crate::tasks::StartupPrewarmHandle;
 use crate::tools::ToolRouter;
 use crate::tools::context::SharedTurnDiffTracker;
 use crate::tools::discoverable::DiscoverableTool;
@@ -313,6 +314,7 @@ use crate::windows_sandbox::WindowsSandboxLevelExt;
 use codex_async_utils::OrCancelExt;
 use codex_otel::SessionTelemetry;
 use codex_otel::TelemetryAuthMode;
+use codex_otel::metrics::names::STARTUP_PREWARM_DURATION_METRIC;
 use codex_otel::metrics::names::THREAD_STARTED_METRIC;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::Personality;
@@ -2411,39 +2413,39 @@ impl Session {
             .await
     }
 
-    pub(crate) async fn take_startup_regular_task(&self) -> Option<RegularTask> {
-        let startup_regular_task = {
-            let mut state = self.state.lock().await;
-            state.take_startup_regular_task()
-        };
-        let startup_regular_task = startup_regular_task?;
-        match startup_regular_task.await {
-            Ok(Ok(regular_task)) => Some(regular_task),
-            Ok(Err(err)) => {
-                warn!("startup websocket prewarm setup failed: {err:#}");
-                None
-            }
-            Err(err) => {
-                warn!("startup websocket prewarm setup join failed: {err}");
-                None
-            }
-        }
+    pub(crate) async fn take_startup_prewarm(&self) -> Option<StartupPrewarmHandle> {
+        let mut state = self.state.lock().await;
+        state.take_startup_prewarm()
     }
 
     async fn schedule_startup_prewarm(self: &Arc<Self>, base_instructions: String) {
         let sess = Arc::clone(self);
-        let startup_regular_task: JoinHandle<CodexResult<RegularTask>> =
-            tokio::spawn(
-                async move { sess.schedule_startup_prewarm_inner(base_instructions).await },
-            );
+        let session_telemetry = self.services.session_telemetry.clone();
+        let websocket_connect_timeout = self.provider().await.websocket_connect_timeout();
+        let started_at = Instant::now();
+        let startup_prewarm: JoinHandle<CodexResult<ModelClientSession>> =
+            tokio::spawn(async move {
+                let result = sess.schedule_startup_prewarm_inner(base_instructions).await;
+                let status = if result.is_ok() { "ready" } else { "failed" };
+                session_telemetry.record_duration(
+                    STARTUP_PREWARM_DURATION_METRIC,
+                    started_at.elapsed(),
+                    &[("status", status)],
+                );
+                result
+            });
         let mut state = self.state.lock().await;
-        state.set_startup_regular_task(startup_regular_task);
+        state.set_startup_prewarm(StartupPrewarmHandle::new(
+            startup_prewarm,
+            started_at,
+            websocket_connect_timeout,
+        ));
     }
 
     async fn schedule_startup_prewarm_inner(
         self: &Arc<Self>,
         base_instructions: String,
-    ) -> CodexResult<RegularTask> {
+    ) -> CodexResult<ModelClientSession> {
         let startup_turn_context = self
             .new_default_turn_with_sub_id(INITIAL_SUBMIT_ID.to_owned())
             .await;
@@ -4412,6 +4414,7 @@ mod handlers {
     use crate::rollout::RolloutRecorder;
     use crate::rollout::session_index;
     use crate::tasks::CompactTask;
+    use crate::tasks::RegularTask;
     use crate::tasks::UndoTask;
     use crate::tasks::UserShellCommandMode;
     use crate::tasks::UserShellCommandTask;
@@ -4550,7 +4553,7 @@ mod handlers {
         {
             sess.refresh_mcp_servers_if_requested(&current_context)
                 .await;
-            let regular_task = sess.take_startup_regular_task().await.unwrap_or_default();
+            let regular_task = RegularTask::new(sess.take_startup_prewarm().await);
             sess.spawn_task(Arc::clone(&current_context), items, regular_task)
                 .await;
         }
@@ -5482,13 +5485,6 @@ pub(crate) async fn run_turn(
 
     let model_info = turn_context.model_info.clone();
     let auto_compact_limit = model_info.auto_compact_token_limit().unwrap_or(i64::MAX);
-
-    let event = EventMsg::TurnStarted(TurnStartedEvent {
-        turn_id: turn_context.sub_id.clone(),
-        model_context_window: turn_context.model_context_window(),
-        collaboration_mode_kind: turn_context.collaboration_mode.mode,
-    });
-    sess.send_event(&turn_context, event).await;
     // TODO(ccunningham): Pre-turn compaction runs before context updates and the
     // new user message are recorded. Estimate pending incoming items (context
     // diffs/full reinjection + user input) and trigger compaction preemptively

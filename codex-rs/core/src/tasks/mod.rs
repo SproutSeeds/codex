@@ -49,6 +49,7 @@ use crate::features::Feature;
 pub(crate) use compact::CompactTask;
 pub(crate) use ghost_snapshot::GhostSnapshotTask;
 pub(crate) use regular::RegularTask;
+pub(crate) use regular::StartupPrewarmHandle;
 pub(crate) use review::ReviewTask;
 pub(crate) use undo::UndoTask;
 pub(crate) use user_shell::UserShellCommandMode;
@@ -384,7 +385,6 @@ impl Session {
         turn.add_task(task);
         *active = Some(turn);
     }
-
     async fn take_active_turn(&self) -> Option<ActiveTurn> {
         let mut active = self.active_turn.lock().await;
         active.take()

@@ -1,5 +1,13 @@
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
+use std::time::Instant;
+
+use async_trait::async_trait;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+use tracing::info;
+use tracing::warn;
 
 use crate::client::ModelClient;
 use crate::client::ModelClientSession;
@@ -7,35 +15,169 @@ use crate::client_common::Prompt;
 use crate::codex::TurnContext;
 use crate::codex::run_turn;
 use crate::error::Result as CodexResult;
+use crate::protocol::EventMsg;
+use crate::protocol::TurnStartedEvent;
 use crate::state::TaskKind;
-use async_trait::async_trait;
+use codex_otel::SessionTelemetry;
+use codex_otel::metrics::names::STARTUP_PREWARM_AGE_AT_FIRST_TURN_METRIC;
+use codex_otel::metrics::names::STARTUP_PREWARM_DURATION_METRIC;
 use codex_protocol::user_input::UserInput;
-use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tracing::trace_span;
 
 use super::SessionTask;
 use super::SessionTaskContext;
 
-pub(crate) struct RegularTask {
-    prewarmed_session: Mutex<Option<ModelClientSession>>,
+pub(crate) struct StartupPrewarmHandle {
+    task: JoinHandle<CodexResult<ModelClientSession>>,
+    started_at: Instant,
+    timeout: Duration,
 }
 
-impl Default for RegularTask {
-    fn default() -> Self {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct StartupPrewarmCancelled;
+
+enum StartupPrewarmOutcome {
+    Consumed(Box<ModelClientSession>),
+    Unavailable {
+        status: &'static str,
+        prewarm_duration: Option<Duration>,
+    },
+}
+
+impl StartupPrewarmHandle {
+    pub(crate) fn new(
+        task: JoinHandle<CodexResult<ModelClientSession>>,
+        started_at: Instant,
+        timeout: Duration,
+    ) -> Self {
         Self {
-            prewarmed_session: Mutex::new(None),
+            task,
+            started_at,
+            timeout,
+        }
+    }
+
+    async fn resolve(
+        self,
+        session_telemetry: &SessionTelemetry,
+        cancellation_token: &CancellationToken,
+    ) -> Result<Option<ModelClientSession>, StartupPrewarmCancelled> {
+        let Self {
+            mut task,
+            started_at,
+            timeout,
+        } = self;
+        let age_at_first_turn = started_at.elapsed();
+        let remaining = timeout.saturating_sub(age_at_first_turn);
+
+        let outcome = if task.is_finished() {
+            Self::outcome_from_join_result(task.await, started_at)
+        } else {
+            match tokio::select! {
+                _ = cancellation_token.cancelled() => None,
+                result = tokio::time::timeout(remaining, &mut task) => Some(result),
+            } {
+                Some(Ok(result)) => Self::outcome_from_join_result(result, started_at),
+                Some(Err(_elapsed)) => {
+                    task.abort();
+                    info!("startup websocket prewarm timed out before the first turn could use it");
+                    StartupPrewarmOutcome::Unavailable {
+                        status: "timed_out",
+                        prewarm_duration: Some(started_at.elapsed()),
+                    }
+                }
+                None => {
+                    task.abort();
+                    session_telemetry.record_duration(
+                        STARTUP_PREWARM_AGE_AT_FIRST_TURN_METRIC,
+                        age_at_first_turn,
+                        &[("status", "cancelled")],
+                    );
+                    session_telemetry.record_duration(
+                        STARTUP_PREWARM_DURATION_METRIC,
+                        started_at.elapsed(),
+                        &[("status", "cancelled")],
+                    );
+                    return Err(StartupPrewarmCancelled);
+                }
+            }
+        };
+
+        match outcome {
+            StartupPrewarmOutcome::Consumed(prewarmed_session) => {
+                session_telemetry.record_duration(
+                    STARTUP_PREWARM_AGE_AT_FIRST_TURN_METRIC,
+                    age_at_first_turn,
+                    &[("status", "consumed")],
+                );
+                Ok(Some(*prewarmed_session))
+            }
+            StartupPrewarmOutcome::Unavailable {
+                status,
+                prewarm_duration,
+            } => {
+                session_telemetry.record_duration(
+                    STARTUP_PREWARM_AGE_AT_FIRST_TURN_METRIC,
+                    age_at_first_turn,
+                    &[("status", status)],
+                );
+                if let Some(prewarm_duration) = prewarm_duration {
+                    session_telemetry.record_duration(
+                        STARTUP_PREWARM_DURATION_METRIC,
+                        prewarm_duration,
+                        &[("status", status)],
+                    );
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    fn outcome_from_join_result(
+        result: std::result::Result<CodexResult<ModelClientSession>, tokio::task::JoinError>,
+        started_at: Instant,
+    ) -> StartupPrewarmOutcome {
+        match result {
+            Ok(Ok(prewarmed_session)) => {
+                StartupPrewarmOutcome::Consumed(Box::new(prewarmed_session))
+            }
+            Ok(Err(err)) => {
+                warn!("startup websocket prewarm setup failed: {err:#}");
+                StartupPrewarmOutcome::Unavailable {
+                    status: "failed",
+                    prewarm_duration: None,
+                }
+            }
+            Err(err) => {
+                warn!("startup websocket prewarm setup join failed: {err}");
+                StartupPrewarmOutcome::Unavailable {
+                    status: "join_failed",
+                    prewarm_duration: Some(started_at.elapsed()),
+                }
+            }
         }
     }
 }
 
+#[derive(Default)]
+pub(crate) struct RegularTask {
+    startup_prewarm: Mutex<Option<StartupPrewarmHandle>>,
+}
+
 impl RegularTask {
+    pub(crate) fn new(startup_prewarm: Option<StartupPrewarmHandle>) -> Self {
+        Self {
+            startup_prewarm: Mutex::new(startup_prewarm),
+        }
+    }
+
     pub(crate) async fn with_startup_prewarm(
         model_client: ModelClient,
         prompt: Prompt,
         turn_context: Arc<TurnContext>,
         turn_metadata_header: Option<String>,
-    ) -> CodexResult<Self> {
+    ) -> CodexResult<ModelClientSession> {
         let mut client_session = model_client.new_session();
         client_session
             .prewarm_websocket(
@@ -49,16 +191,25 @@ impl RegularTask {
             )
             .await?;
 
-        Ok(Self {
-            prewarmed_session: Mutex::new(Some(client_session)),
-        })
+        Ok(client_session)
     }
 
-    async fn take_prewarmed_session(&self) -> Option<ModelClientSession> {
-        self.prewarmed_session
+    async fn take_prewarmed_session(
+        &self,
+        session_telemetry: &SessionTelemetry,
+        cancellation_token: &CancellationToken,
+    ) -> Result<Option<ModelClientSession>, StartupPrewarmCancelled> {
+        let startup_prewarm = self
+            .startup_prewarm
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
+            .take();
+        let Some(startup_prewarm) = startup_prewarm else {
+            return Ok(None);
+        };
+        startup_prewarm
+            .resolve(session_telemetry, cancellation_token)
+            .await
     }
 }
 
@@ -81,8 +232,22 @@ impl SessionTask for RegularTask {
     ) -> Option<String> {
         let sess = session.clone_session();
         let run_turn_span = trace_span!("run_turn");
+        // Regular turns emit `TurnStarted` inline so first-turn lifecycle does
+        // not wait on startup prewarm resolution.
+        let event = EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: ctx.sub_id.clone(),
+            model_context_window: ctx.model_context_window(),
+            collaboration_mode_kind: ctx.collaboration_mode.mode,
+        });
+        sess.send_event(ctx.as_ref(), event).await;
         sess.set_server_reasoning_included(/*included*/ false).await;
-        let prewarmed_client_session = self.take_prewarmed_session().await;
+        let prewarmed_client_session = match self
+            .take_prewarmed_session(&sess.services.session_telemetry, &cancellation_token)
+            .await
+        {
+            Ok(prewarmed_client_session) => prewarmed_client_session,
+            Err(StartupPrewarmCancelled) => return None,
+        };
         run_turn(
             sess,
             ctx,

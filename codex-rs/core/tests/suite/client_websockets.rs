@@ -7,6 +7,7 @@ use codex_core::Prompt;
 use codex_core::ResponseEvent;
 use codex_core::WireApi;
 use codex_core::X_RESPONSESAPI_INCLUDE_TIMING_METRICS_HEADER;
+use codex_core::error::CodexErr;
 use codex_core::features::Feature;
 use codex_core::ws_version_from_features;
 use codex_otel::SessionTelemetry;
@@ -360,6 +361,70 @@ async fn responses_websocket_prewarm_uses_v2_when_model_prefers_websockets_and_f
         prewarm["input"],
         serde_json::to_value(&prompt.input).unwrap()
     );
+
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_websocket_connect_timeout_clears_cached_websocket_state() {
+    skip_if_no_network!();
+
+    let server = start_websocket_server_with_headers(vec![
+        WebSocketConnectionConfig {
+            requests: vec![Vec::new()],
+            response_headers: Vec::new(),
+            accept_delay: Some(Duration::from_millis(150)),
+            close_after_requests: false,
+        },
+        WebSocketConnectionConfig {
+            requests: vec![vec![ev_response_created("resp-1"), ev_completed("resp-1")]],
+            response_headers: Vec::new(),
+            accept_delay: None,
+            close_after_requests: true,
+        },
+    ])
+    .await;
+
+    let harness = websocket_harness_with_provider_options(
+        websocket_provider_with_connect_timeout(&server, Some(50)),
+        false,
+        true,
+        false,
+        false,
+    )
+    .await;
+    let prompt = prompt_with_input(vec![message_item("hello")]);
+
+    {
+        let mut session = harness.client.new_session();
+        let err = session
+            .prewarm_websocket(
+                &prompt,
+                &harness.model_info,
+                &harness.session_telemetry,
+                harness.effort,
+                harness.summary,
+                None,
+                None,
+            )
+            .await
+            .expect_err("prewarm should time out");
+        assert!(matches!(err, CodexErr::Timeout));
+    }
+
+    let mut session = harness.client.new_session();
+    stream_until_complete(&mut session, &harness, &prompt).await;
+
+    let connections = server.connections();
+    assert_eq!(connections.len(), 2);
+    assert_eq!(connections[0].len(), 1);
+    assert_eq!(connections[1].len(), 1);
+    let request = connections[1]
+        .first()
+        .expect("missing streamed request")
+        .body_json();
+    assert_eq!(request["type"].as_str(), Some("response.create"));
+    assert_eq!(request.get("previous_response_id"), None);
 
     server.shutdown().await;
 }
@@ -1500,6 +1565,13 @@ fn prompt_with_input_and_instructions(input: Vec<ResponseItem>, instructions: &s
 }
 
 fn websocket_provider(server: &WebSocketTestServer) -> ModelProviderInfo {
+    websocket_provider_with_connect_timeout(server, None)
+}
+
+fn websocket_provider_with_connect_timeout(
+    server: &WebSocketTestServer,
+    websocket_connect_timeout_ms: Option<u64>,
+) -> ModelProviderInfo {
     ModelProviderInfo {
         name: "mock-ws".into(),
         base_url: Some(format!("{}/v1", server.uri())),
@@ -1513,6 +1585,7 @@ fn websocket_provider(server: &WebSocketTestServer) -> ModelProviderInfo {
         request_max_retries: Some(0),
         stream_max_retries: Some(0),
         stream_idle_timeout_ms: Some(5_000),
+        websocket_connect_timeout_ms,
         requires_openai_auth: false,
         supports_websockets: true,
     }
@@ -1543,7 +1616,23 @@ async fn websocket_harness_with_options(
     websocket_v2_enabled: bool,
     prefer_websockets: bool,
 ) -> WebsocketTestHarness {
-    let provider = websocket_provider(server);
+    websocket_harness_with_provider_options(
+        websocket_provider(server),
+        runtime_metrics_enabled,
+        websocket_enabled,
+        websocket_v2_enabled,
+        prefer_websockets,
+    )
+    .await
+}
+
+async fn websocket_harness_with_provider_options(
+    provider: ModelProviderInfo,
+    runtime_metrics_enabled: bool,
+    websocket_enabled: bool,
+    websocket_v2_enabled: bool,
+    prefer_websockets: bool,
+) -> WebsocketTestHarness {
     let codex_home = TempDir::new().unwrap();
     let mut config = load_default_config_for_test(&codex_home).await;
     config.model = Some(MODEL.to_string());
