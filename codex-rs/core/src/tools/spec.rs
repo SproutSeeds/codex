@@ -3091,7 +3091,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
             create_spawn_agent_tool(config),
             /*supports_parallel_tool_calls*/ false,
             "spawn_agent",
-            multi_agent_handler.clone(),
+            Arc::new(SpawnAgentHandler),
         );
         push_builtin_tool_with_handler_if_enabled(
             &mut builder,
@@ -3100,7 +3100,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
             create_send_input_tool(),
             /*supports_parallel_tool_calls*/ false,
             "send_input",
-            multi_agent_handler.clone(),
+            Arc::new(SendInputHandler),
         );
         push_builtin_tool_with_handler_if_enabled(
             &mut builder,
@@ -3109,16 +3109,16 @@ pub(crate) fn build_specs_with_discoverable_tools(
             create_resume_agent_tool(),
             /*supports_parallel_tool_calls*/ false,
             "resume_agent",
-            multi_agent_handler.clone(),
+            Arc::new(ResumeAgentHandler),
         );
         push_builtin_tool_with_handler_if_enabled(
             &mut builder,
             config,
-            "wait",
+            "wait_agent",
             create_wait_agent_tool(),
             /*supports_parallel_tool_calls*/ false,
-            "wait",
-            multi_agent_handler.clone(),
+            "wait_agent",
+            Arc::new(WaitAgentHandler),
         );
         push_builtin_tool_with_handler_if_enabled(
             &mut builder,
@@ -3127,13 +3127,8 @@ pub(crate) fn build_specs_with_discoverable_tools(
             create_close_agent_tool(),
             /*supports_parallel_tool_calls*/ false,
             "close_agent",
-            multi_agent_handler,
+            Arc::new(CloseAgentHandler),
         );
-        builder.register_handler("spawn_agent", Arc::new(SpawnAgentHandler));
-        builder.register_handler("send_input", Arc::new(SendInputHandler));
-        builder.register_handler("resume_agent", Arc::new(ResumeAgentHandler));
-        builder.register_handler("wait_agent", Arc::new(WaitAgentHandler));
-        builder.register_handler("close_agent", Arc::new(CloseAgentHandler));
     }
 
     if config.agent_jobs_tools {
