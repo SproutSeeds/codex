@@ -2918,12 +2918,23 @@ pub(crate) fn managed_guardian_developer_instructions(
 }
 
 fn is_managed_guardian_override_source(source: &ConfigLayerSource) -> bool {
-    matches!(
-        source,
-        ConfigLayerSource::Mdm { .. }
-            | ConfigLayerSource::LegacyManagedConfigTomlFromFile { .. }
-            | ConfigLayerSource::LegacyManagedConfigTomlFromMdm
-    )
+    match source {
+        ConfigLayerSource::Mdm { .. } | ConfigLayerSource::LegacyManagedConfigTomlFromMdm => true,
+        ConfigLayerSource::LegacyManagedConfigTomlFromFile { file } => {
+            is_trusted_legacy_managed_config_file(file)
+        }
+        _ => false,
+    }
+}
+
+#[cfg(unix)]
+fn is_trusted_legacy_managed_config_file(file: &AbsolutePathBuf) -> bool {
+    file.as_path() == Path::new("/etc/codex/managed_config.toml")
+}
+
+#[cfg(not(unix))]
+fn is_trusted_legacy_managed_config_file(_file: &AbsolutePathBuf) -> bool {
+    false
 }
 
 fn toml_uses_deprecated_instructions_file(value: &TomlValue) -> bool {

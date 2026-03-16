@@ -11,9 +11,11 @@ use crate::config::types::MemoriesToml;
 use crate::config::types::ModelAvailabilityNuxConfig;
 use crate::config::types::NotificationMethod;
 use crate::config::types::Notifications;
+use crate::config_loader::ConfigLayerEntry;
 use crate::config_loader::RequirementSource;
 use crate::features::Feature;
 use assert_matches::assert_matches;
+use codex_app_server_protocol::ConfigLayerSource;
 use codex_config::CONFIG_TOML_FILE;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
@@ -3015,48 +3017,32 @@ fn load_config_ignores_unmanaged_guardian_developer_instructions() -> std::io::R
 #[tokio::test]
 async fn managed_config_overrides_guardian_developer_instructions() -> anyhow::Result<()> {
     let codex_home = TempDir::new()?;
-    let managed_path = codex_home.path().join("managed_config.toml");
-    let config_path = codex_home.path().join(CONFIG_TOML_FILE);
-
-    std::fs::write(
-        &config_path,
-        "guardian_developer_instructions = \"\"\"\nuser override\n\"\"\"\n",
+    let user_file = AbsolutePathBuf::try_from(codex_home.path().join(CONFIG_TOML_FILE))?;
+    let config_layer_stack = ConfigLayerStack::new(
+        vec![
+            ConfigLayerEntry::new(
+                ConfigLayerSource::User { file: user_file },
+                toml::from_str(
+                    "guardian_developer_instructions = \"\"\"\nuser override\n\"\"\"\n",
+                )?,
+            ),
+            ConfigLayerEntry::new(
+                ConfigLayerSource::LegacyManagedConfigTomlFromMdm,
+                toml::from_str(
+                    "guardian_developer_instructions = \"\"\"\n  managed override  \n\"\"\"\n",
+                )?,
+            ),
+        ],
+        Default::default(),
+        Default::default(),
     )?;
-    std::fs::write(
-        &managed_path,
-        "guardian_developer_instructions = \"\"\"\n  managed override  \n\"\"\"\n",
-    )?;
-
-    let overrides = LoaderOverrides {
-        managed_config_path: Some(managed_path.clone()),
-        #[cfg(target_os = "macos")]
-        managed_preferences_base64: None,
-        macos_managed_config_requirements_base64: None,
-    };
-
-    let cwd = AbsolutePathBuf::try_from(codex_home.path())?;
-    let config_layer_stack = load_config_layers_state(
-        codex_home.path(),
-        Some(cwd),
-        &Vec::new(),
-        overrides,
-        CloudRequirementsLoader::default(),
-    )
-    .await?;
-    let cfg =
-        deserialize_config_toml_with_base(config_layer_stack.effective_config(), codex_home.path())
-            .map_err(|e| {
-                tracing::error!("Failed to deserialize overridden config: {e}");
-                e
-            })?;
-    assert_eq!(
-        cfg.guardian_developer_instructions.as_deref(),
-        Some("  managed override  \n")
-    );
 
     let final_config = Config::load_config_with_layer_stack(
-        cfg,
-        ConfigOverrides::default(),
+        ConfigToml::default(),
+        ConfigOverrides {
+            cwd: Some(codex_home.path().to_path_buf()),
+            ..Default::default()
+        },
         codex_home.path().to_path_buf(),
         config_layer_stack,
     )?;
@@ -3064,6 +3050,41 @@ async fn managed_config_overrides_guardian_developer_instructions() -> anyhow::R
         final_config.guardian_developer_instructions.as_deref(),
         Some("managed override")
     );
+
+    Ok(())
+}
+
+#[test]
+fn load_config_ignores_untrusted_legacy_managed_config_file_guardian_override()
+-> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let untrusted_managed_file =
+        AbsolutePathBuf::try_from(codex_home.path().join("managed_config.toml"))?;
+    let untrusted_managed_config =
+        toml::from_str("guardian_developer_instructions = \"\"\"\nshould be ignored\n\"\"\"\n")
+            .map_err(std::io::Error::other)?;
+    let config_layer_stack = ConfigLayerStack::new(
+        vec![ConfigLayerEntry::new(
+            ConfigLayerSource::LegacyManagedConfigTomlFromFile {
+                file: untrusted_managed_file,
+            },
+            untrusted_managed_config,
+        )],
+        Default::default(),
+        Default::default(),
+    )?;
+
+    let config = Config::load_config_with_layer_stack(
+        ConfigToml::default(),
+        ConfigOverrides {
+            cwd: Some(codex_home.path().to_path_buf()),
+            ..Default::default()
+        },
+        codex_home.path().to_path_buf(),
+        config_layer_stack,
+    )?;
+
+    assert_eq!(config.guardian_developer_instructions, None);
 
     Ok(())
 }
