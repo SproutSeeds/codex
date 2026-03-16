@@ -430,7 +430,8 @@ fn guardian_output_contract_prompt() -> &'static str {
 ///
 /// Keep `policy.md` aligned with the OpenAI-managed override in openai/jamf-tf:
 /// https://github.com/openai/jamf-tf/blob/main/modules/codex/guardian_developer_instructions.toml
-/// General/default guardian instruction changes should be mirrored there
+/// Introduced via openai/jamf-tf#958. General/default guardian instruction
+/// changes should be mirrored there
 /// unless the divergence is intentionally OpenAI-specific.
 pub(crate) fn guardian_policy_prompt() -> String {
     let prompt = include_str!("policy.md").trim_end();
