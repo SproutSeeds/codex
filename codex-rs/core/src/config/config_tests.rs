@@ -3054,6 +3054,48 @@ async fn managed_config_overrides_guardian_developer_instructions() -> anyhow::R
     Ok(())
 }
 
+#[tokio::test]
+async fn system_config_overrides_guardian_developer_instructions() -> anyhow::Result<()> {
+    let codex_home = TempDir::new()?;
+    let user_file = AbsolutePathBuf::try_from(codex_home.path().join(CONFIG_TOML_FILE))?;
+    let system_file =
+        AbsolutePathBuf::try_from(codex_home.path().join("system").join(CONFIG_TOML_FILE))?;
+    let config_layer_stack = ConfigLayerStack::new(
+        vec![
+            ConfigLayerEntry::new(
+                ConfigLayerSource::System { file: system_file },
+                toml::from_str(
+                    "guardian_developer_instructions = \"\"\"\n  system override  \n\"\"\"\n",
+                )?,
+            ),
+            ConfigLayerEntry::new(
+                ConfigLayerSource::User { file: user_file },
+                toml::from_str(
+                    "guardian_developer_instructions = \"\"\"\nuser override\n\"\"\"\n",
+                )?,
+            ),
+        ],
+        Default::default(),
+        Default::default(),
+    )?;
+
+    let final_config = Config::load_config_with_layer_stack(
+        ConfigToml::default(),
+        ConfigOverrides {
+            cwd: Some(codex_home.path().to_path_buf()),
+            ..Default::default()
+        },
+        codex_home.path().to_path_buf(),
+        config_layer_stack,
+    )?;
+    assert_eq!(
+        final_config.guardian_developer_instructions.as_deref(),
+        Some("system override")
+    );
+
+    Ok(())
+}
+
 #[test]
 fn load_config_ignores_untrusted_legacy_managed_config_file_guardian_override()
 -> std::io::Result<()> {

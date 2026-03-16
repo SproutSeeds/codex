@@ -2919,7 +2919,9 @@ pub(crate) fn managed_guardian_developer_instructions(
 
 fn is_managed_guardian_override_source(source: &ConfigLayerSource) -> bool {
     match source {
-        ConfigLayerSource::Mdm { .. } | ConfigLayerSource::LegacyManagedConfigTomlFromMdm => true,
+        ConfigLayerSource::System { .. }
+        | ConfigLayerSource::Mdm { .. }
+        | ConfigLayerSource::LegacyManagedConfigTomlFromMdm => true,
         ConfigLayerSource::LegacyManagedConfigTomlFromFile { file } => {
             is_trusted_legacy_managed_config_file(file)
         }
