@@ -119,8 +119,6 @@ pub use codex_network_proxy::NetworkProxyAuditMetadata;
 pub use managed_features::ManagedFeatures;
 pub use network_proxy_spec::NetworkProxySpec;
 pub use network_proxy_spec::StartedNetworkProxy;
-
-const GUARDIAN_DEVELOPER_INSTRUCTIONS_KEY: &str = "guardian_developer_instructions";
 pub use permissions::FilesystemPermissionToml;
 pub use permissions::FilesystemPermissionsToml;
 pub use permissions::NetworkToml;
@@ -2893,6 +2891,8 @@ pub(crate) fn uses_deprecated_instructions_file(config_layer_stack: &ConfigLayer
 pub(crate) fn managed_guardian_developer_instructions(
     config_layer_stack: &ConfigLayerStack,
 ) -> Option<String> {
+    const GUARDIAN_DEVELOPER_INSTRUCTIONS_KEY: &str = "guardian_developer_instructions";
+
     for layer in config_layer_stack.layers_high_to_low() {
         if !is_managed_guardian_override_source(&layer.name) {
             continue;
