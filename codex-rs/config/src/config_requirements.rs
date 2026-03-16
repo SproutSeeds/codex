@@ -783,7 +783,7 @@ mod tests {
                 network: None,
                 guardian_developer_instructions: Some(Sourced::new(
                     guardian_developer_instructions,
-                    source.clone(),
+                    source,
                 )),
             }
         );
