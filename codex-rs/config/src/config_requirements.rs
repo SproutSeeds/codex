@@ -872,10 +872,10 @@ mod tests {
     fn deserialize_guardian_developer_instructions() -> Result<()> {
         let requirements: ConfigRequirementsToml = from_str(
             r#"
-                guardian_developer_instructions = """
-                Use the cloud-managed guardian policy.
-                """
-            "#,
+guardian_developer_instructions = """
+Use the cloud-managed guardian policy.
+"""
+"#,
         )?;
 
         assert_eq!(
