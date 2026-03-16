@@ -8,7 +8,6 @@ use crate::config::Constrained;
 use crate::config::ManagedFeatures;
 use crate::config::NetworkProxySpec;
 use crate::config::test_config;
-use crate::config_loader::ConfigLayerEntry;
 use crate::config_loader::ConfigLayerStack;
 use crate::config_loader::FeatureRequirementsToml;
 use crate::config_loader::NetworkConstraints;
@@ -16,7 +15,6 @@ use crate::config_loader::RequirementSource;
 use crate::config_loader::Sourced;
 use crate::protocol::SandboxPolicy;
 use crate::test_support;
-use codex_app_server_protocol::ConfigLayerSource;
 use codex_network_proxy::NetworkProxyConfig;
 use codex_protocol::approvals::NetworkApprovalProtocol;
 use codex_protocol::config_types::ApprovalsReviewer;
@@ -995,48 +993,18 @@ fn guardian_review_session_config_uses_parent_active_model_instead_of_hardcoded_
 }
 
 #[test]
-fn guardian_review_session_config_uses_managed_guardian_config_override() {
+fn guardian_review_session_config_uses_requirements_guardian_override() {
     let codex_home = tempfile::tempdir().expect("create temp dir");
     let workspace = tempfile::tempdir().expect("create temp dir");
-    let user_file =
-        AbsolutePathBuf::try_from(codex_home.path().join("config.toml")).expect("absolute path");
-    let project_dot_codex =
-        AbsolutePathBuf::try_from(workspace.path().join(".codex")).expect("absolute path");
     let config_layer_stack = ConfigLayerStack::new(
-        vec![
-            ConfigLayerEntry::new(
-                ConfigLayerSource::User { file: user_file },
-                toml::from_str(
-                    "guardian_developer_instructions = \"\"\"\nUser override that should lose.\n\"\"\"\n",
-                )
-                .expect("parse user config"),
-            ),
-            ConfigLayerEntry::new(
-                ConfigLayerSource::Project {
-                    dot_codex_folder: project_dot_codex,
-                },
-                toml::from_str(
-                    "guardian_developer_instructions = \"\"\"\nProject override that should lose.\n\"\"\"\n",
-                )
-                .expect("parse project config"),
-            ),
-            ConfigLayerEntry::new(
-                ConfigLayerSource::SessionFlags,
-                toml::from_str(
-                    "guardian_developer_instructions = \"\"\"\ncli override that should lose\n\"\"\"\n",
-                )
-                .expect("parse cli config"),
-            ),
-            ConfigLayerEntry::new(
-                ConfigLayerSource::LegacyManagedConfigTomlFromMdm,
-                toml::from_str(
-                    "guardian_developer_instructions = \"\"\"\n  Use the company-managed guardian policy.  \n\"\"\"\n",
-                )
-                .expect("parse managed config"),
-            ),
-        ],
+        Vec::new(),
         Default::default(),
-        Default::default(),
+        crate::config_loader::ConfigRequirementsToml {
+            guardian_developer_instructions: Some(
+                "  Use the workspace-managed guardian policy.  ".to_string(),
+            ),
+            ..Default::default()
+        },
     )
     .expect("config layer stack");
     let parent_config = Config::load_config_with_layer_stack(
@@ -1056,48 +1024,17 @@ fn guardian_review_session_config_uses_managed_guardian_config_override() {
 
     assert_eq!(
         guardian_config.developer_instructions,
-        Some("Use the company-managed guardian policy.".to_string())
+        Some("Use the workspace-managed guardian policy.".to_string())
     );
 }
 
 #[test]
-fn guardian_review_session_config_ignores_unmanaged_guardian_config_overrides() {
+fn guardian_review_session_config_uses_default_guardian_policy_without_requirements_override() {
     let codex_home = tempfile::tempdir().expect("create temp dir");
     let workspace = tempfile::tempdir().expect("create temp dir");
-    let user_file =
-        AbsolutePathBuf::try_from(codex_home.path().join("config.toml")).expect("absolute path");
-    let project_dot_codex =
-        AbsolutePathBuf::try_from(workspace.path().join(".codex")).expect("absolute path");
-    let config_layer_stack = ConfigLayerStack::new(
-        vec![
-            ConfigLayerEntry::new(
-                ConfigLayerSource::User { file: user_file },
-                toml::from_str(
-                    "guardian_developer_instructions = \"\"\"\nUser override that should lose.\n\"\"\"\n",
-                )
-                .expect("parse user config"),
-            ),
-            ConfigLayerEntry::new(
-                ConfigLayerSource::Project {
-                    dot_codex_folder: project_dot_codex,
-                },
-                toml::from_str(
-                    "guardian_developer_instructions = \"\"\"\nProject override that should lose.\n\"\"\"\n",
-                )
-                .expect("parse project config"),
-            ),
-            ConfigLayerEntry::new(
-                ConfigLayerSource::SessionFlags,
-                toml::from_str(
-                    "guardian_developer_instructions = \"\"\"\ncli override that should lose\n\"\"\"\n",
-                )
-                .expect("parse cli config"),
-            ),
-        ],
-        Default::default(),
-        Default::default(),
-    )
-    .expect("config layer stack");
+    let config_layer_stack =
+        ConfigLayerStack::new(Vec::new(), Default::default(), Default::default())
+            .expect("config layer stack");
     let parent_config = Config::load_config_with_layer_stack(
         ConfigToml::default(),
         ConfigOverrides {
@@ -1108,8 +1045,6 @@ fn guardian_review_session_config_ignores_unmanaged_guardian_config_overrides() 
         config_layer_stack,
     )
     .expect("load config");
-
-    assert_eq!(parent_config.guardian_developer_instructions, None);
 
     let guardian_config =
         build_guardian_review_session_config_for_test(&parent_config, None, "active-model", None)

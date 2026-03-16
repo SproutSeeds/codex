@@ -29,6 +29,7 @@ use crate::config_loader::CloudRequirementsLoader;
 use crate::config_loader::ConfigLayerStack;
 use crate::config_loader::ConfigLayerStackOrdering;
 use crate::config_loader::ConfigRequirements;
+use crate::config_loader::ConfigRequirementsToml;
 use crate::config_loader::ConstrainedWithSource;
 use crate::config_loader::LoaderOverrides;
 use crate::config_loader::McpServerIdentity;
@@ -60,7 +61,6 @@ use crate::unified_exec::MIN_EMPTY_YIELD_TIME_MS;
 use crate::windows_sandbox::WindowsSandboxLevelExt;
 use crate::windows_sandbox::resolve_windows_sandbox_mode;
 use crate::windows_sandbox::resolve_windows_sandbox_private_desktop;
-use codex_app_server_protocol::ConfigLayerSource;
 use codex_app_server_protocol::Tools;
 use codex_app_server_protocol::UserSavedConfig;
 use codex_protocol::config_types::AltScreenMode;
@@ -272,7 +272,7 @@ pub struct Config {
     /// Developer instructions override injected as a separate message.
     pub developer_instructions: Option<String>,
 
-    /// Guardian-specific developer instructions override from managed config.
+    /// Guardian-specific developer instructions override from requirements.toml.
     pub guardian_developer_instructions: Option<String>,
 
     /// Compact prompt override.
@@ -1230,14 +1230,6 @@ pub struct ConfigToml {
     /// Developer instructions inserted as a `developer` role message.
     #[serde(default)]
     pub developer_instructions: Option<String>,
-
-    /// Guardian-specific developer instructions used for approval review.
-    ///
-    /// This is intended for managed policy overrides, such as company-wide
-    /// security guidance delivered via managed config or MDM. Values from
-    /// user, project, and session-layer config are ignored.
-    #[serde(default)]
-    pub guardian_developer_instructions: Option<String>,
 
     /// Optional path to a file containing model instructions that will override
     /// the built-in instructions for the selected model. Users are STRONGLY
@@ -2484,8 +2476,9 @@ impl Config {
             Self::try_read_non_empty_file(model_instructions_path, "model instructions file")?;
         let base_instructions = base_instructions.or(file_base_instructions);
         let developer_instructions = developer_instructions.or(cfg.developer_instructions);
-        let guardian_developer_instructions =
-            managed_guardian_developer_instructions(&config_layer_stack);
+        let guardian_developer_instructions = guardian_developer_instructions_from_requirements(
+            config_layer_stack.requirements_toml(),
+        );
         let personality = personality
             .or(config_profile.personality)
             .or(cfg.personality)
@@ -2888,55 +2881,16 @@ pub(crate) fn uses_deprecated_instructions_file(config_layer_stack: &ConfigLayer
         .any(|layer| toml_uses_deprecated_instructions_file(&layer.config))
 }
 
-pub(crate) fn managed_guardian_developer_instructions(
-    config_layer_stack: &ConfigLayerStack,
+fn guardian_developer_instructions_from_requirements(
+    requirements_toml: &ConfigRequirementsToml,
 ) -> Option<String> {
-    const GUARDIAN_DEVELOPER_INSTRUCTIONS_KEY: &str = "guardian_developer_instructions";
-
-    for layer in config_layer_stack.layers_high_to_low() {
-        if !is_managed_guardian_override_source(&layer.name) {
-            continue;
-        }
-
-        let Some(value) = layer
-            .config
-            .as_table()
-            .and_then(|table| table.get(GUARDIAN_DEVELOPER_INSTRUCTIONS_KEY))
-        else {
-            continue;
-        };
-
-        let Some(value) = value.as_str() else {
-            continue;
-        };
-
-        let trimmed = value.trim();
-        return (!trimmed.is_empty()).then(|| trimmed.to_string());
-    }
-
-    None
-}
-
-fn is_managed_guardian_override_source(source: &ConfigLayerSource) -> bool {
-    match source {
-        ConfigLayerSource::System { .. }
-        | ConfigLayerSource::Mdm { .. }
-        | ConfigLayerSource::LegacyManagedConfigTomlFromMdm => true,
-        ConfigLayerSource::LegacyManagedConfigTomlFromFile { file } => {
-            is_trusted_legacy_managed_config_file(file)
-        }
-        _ => false,
-    }
-}
-
-#[cfg(unix)]
-fn is_trusted_legacy_managed_config_file(file: &AbsolutePathBuf) -> bool {
-    file.as_path() == Path::new("/etc/codex/managed_config.toml")
-}
-
-#[cfg(not(unix))]
-fn is_trusted_legacy_managed_config_file(_file: &AbsolutePathBuf) -> bool {
-    false
+    requirements_toml
+        .guardian_developer_instructions
+        .as_deref()
+        .and_then(|value| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        })
 }
 
 fn toml_uses_deprecated_instructions_file(value: &TomlValue) -> bool {

@@ -296,6 +296,7 @@ pub struct ConfigRequirementsToml {
     pub enforce_residency: Option<ResidencyRequirement>,
     #[serde(rename = "experimental_network")]
     pub network: Option<NetworkRequirementsToml>,
+    pub guardian_developer_instructions: Option<String>,
 }
 
 /// Value paired with the requirement source it came from, for better error
@@ -331,6 +332,7 @@ pub struct ConfigRequirementsWithSources {
     pub rules: Option<Sourced<RequirementsExecPolicyToml>>,
     pub enforce_residency: Option<Sourced<ResidencyRequirement>>,
     pub network: Option<Sourced<NetworkRequirementsToml>>,
+    pub guardian_developer_instructions: Option<Sourced<String>>,
 }
 
 impl ConfigRequirementsWithSources {
@@ -361,6 +363,7 @@ impl ConfigRequirementsWithSources {
             rules: _,
             enforce_residency: _,
             network: _,
+            guardian_developer_instructions: _,
         } = &other;
 
         let mut other = other;
@@ -377,6 +380,7 @@ impl ConfigRequirementsWithSources {
                 rules,
                 enforce_residency,
                 network,
+                guardian_developer_instructions,
             }
         );
 
@@ -400,6 +404,7 @@ impl ConfigRequirementsWithSources {
             rules,
             enforce_residency,
             network,
+            guardian_developer_instructions,
         } = self;
         ConfigRequirementsToml {
             allowed_approval_policies: allowed_approval_policies.map(|sourced| sourced.value),
@@ -411,6 +416,8 @@ impl ConfigRequirementsWithSources {
             rules: rules.map(|sourced| sourced.value),
             enforce_residency: enforce_residency.map(|sourced| sourced.value),
             network: network.map(|sourced| sourced.value),
+            guardian_developer_instructions: guardian_developer_instructions
+                .map(|sourced| sourced.value),
         }
     }
 }
@@ -465,6 +472,7 @@ impl ConfigRequirementsToml {
             && self.rules.is_none()
             && self.enforce_residency.is_none()
             && self.network.is_none()
+            && self.guardian_developer_instructions.is_none()
     }
 }
 
@@ -482,6 +490,7 @@ impl TryFrom<ConfigRequirementsWithSources> for ConfigRequirements {
             rules,
             enforce_residency,
             network,
+            guardian_developer_instructions: _guardian_developer_instructions,
         } = toml;
 
         let approval_policy = match allowed_approval_policies {
@@ -690,6 +699,7 @@ mod tests {
             rules,
             enforce_residency,
             network,
+            guardian_developer_instructions,
         } = toml;
         ConfigRequirementsWithSources {
             allowed_approval_policies: allowed_approval_policies
@@ -706,6 +716,8 @@ mod tests {
             enforce_residency: enforce_residency
                 .map(|value| Sourced::new(value, RequirementSource::Unknown)),
             network: network.map(|value| Sourced::new(value, RequirementSource::Unknown)),
+            guardian_developer_instructions: guardian_developer_instructions
+                .map(|value| Sourced::new(value, RequirementSource::Unknown)),
         }
     }
 
@@ -728,6 +740,8 @@ mod tests {
         };
         let enforce_residency = ResidencyRequirement::Us;
         let enforce_source = source.clone();
+        let guardian_developer_instructions =
+            "Use the company-managed guardian policy.".to_string();
 
         // Intentionally constructed without `..Default::default()` so adding a new field to
         // `ConfigRequirementsToml` forces this test to be updated.
@@ -741,6 +755,7 @@ mod tests {
             rules: None,
             enforce_residency: Some(enforce_residency),
             network: None,
+            guardian_developer_instructions: Some(guardian_developer_instructions.clone()),
         };
 
         target.merge_unset_fields(source.clone(), other);
@@ -752,7 +767,7 @@ mod tests {
                     allowed_approval_policies,
                     source.clone()
                 )),
-                allowed_sandbox_modes: Some(Sourced::new(allowed_sandbox_modes, source)),
+                allowed_sandbox_modes: Some(Sourced::new(allowed_sandbox_modes, source.clone(),)),
                 allowed_web_search_modes: Some(Sourced::new(
                     allowed_web_search_modes,
                     enforce_source.clone(),
@@ -766,6 +781,10 @@ mod tests {
                 rules: None,
                 enforce_residency: Some(Sourced::new(enforce_residency, enforce_source)),
                 network: None,
+                guardian_developer_instructions: Some(Sourced::new(
+                    guardian_developer_instructions,
+                    source.clone(),
+                )),
             }
         );
     }
@@ -800,6 +819,7 @@ mod tests {
                 rules: None,
                 enforce_residency: None,
                 network: None,
+                guardian_developer_instructions: None,
             }
         );
         Ok(())
@@ -842,7 +862,25 @@ mod tests {
                 rules: None,
                 enforce_residency: None,
                 network: None,
+                guardian_developer_instructions: None,
             }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn deserialize_guardian_developer_instructions() -> Result<()> {
+        let requirements: ConfigRequirementsToml = from_str(
+            r#"
+                guardian_developer_instructions = """
+                Use the cloud-managed guardian policy.
+                """
+            "#,
+        )?;
+
+        assert_eq!(
+            requirements.guardian_developer_instructions.as_deref(),
+            Some("Use the cloud-managed guardian policy.\n")
         );
         Ok(())
     }

@@ -11,11 +11,9 @@ use crate::config::types::MemoriesToml;
 use crate::config::types::ModelAvailabilityNuxConfig;
 use crate::config::types::NotificationMethod;
 use crate::config::types::Notifications;
-use crate::config_loader::ConfigLayerEntry;
 use crate::config_loader::RequirementSource;
 use crate::features::Feature;
 use assert_matches::assert_matches;
-use codex_app_server_protocol::ConfigLayerSource;
 use codex_config::CONFIG_TOML_FILE;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
@@ -2995,49 +2993,21 @@ fn loads_compact_prompt_from_file() -> std::io::Result<()> {
 }
 
 #[test]
-fn load_config_ignores_unmanaged_guardian_developer_instructions() -> std::io::Result<()> {
+fn load_config_uses_requirements_guardian_developer_instructions() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
-
-    let config = Config::load_from_base_config_with_overrides(
-        ConfigToml {
+    let config_layer_stack = ConfigLayerStack::new(
+        Vec::new(),
+        Default::default(),
+        crate::config_loader::ConfigRequirementsToml {
             guardian_developer_instructions: Some(
-                "  Use the managed guardian prompt override.  ".to_string(),
+                "  Use the workspace-managed guardian policy.  ".to_string(),
             ),
             ..Default::default()
         },
-        ConfigOverrides::default(),
-        codex_home.path().to_path_buf(),
-    )?;
+    )
+    .map_err(std::io::Error::other)?;
 
-    assert_eq!(config.guardian_developer_instructions, None);
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn managed_config_overrides_guardian_developer_instructions() -> anyhow::Result<()> {
-    let codex_home = TempDir::new()?;
-    let user_file = AbsolutePathBuf::try_from(codex_home.path().join(CONFIG_TOML_FILE))?;
-    let config_layer_stack = ConfigLayerStack::new(
-        vec![
-            ConfigLayerEntry::new(
-                ConfigLayerSource::User { file: user_file },
-                toml::from_str(
-                    "guardian_developer_instructions = \"\"\"\nuser override\n\"\"\"\n",
-                )?,
-            ),
-            ConfigLayerEntry::new(
-                ConfigLayerSource::LegacyManagedConfigTomlFromMdm,
-                toml::from_str(
-                    "guardian_developer_instructions = \"\"\"\n  managed override  \n\"\"\"\n",
-                )?,
-            ),
-        ],
-        Default::default(),
-        Default::default(),
-    )?;
-
-    let final_config = Config::load_config_with_layer_stack(
+    let config = Config::load_config_with_layer_stack(
         ConfigToml::default(),
         ConfigOverrides {
             cwd: Some(codex_home.path().to_path_buf()),
@@ -3046,75 +3016,27 @@ async fn managed_config_overrides_guardian_developer_instructions() -> anyhow::R
         codex_home.path().to_path_buf(),
         config_layer_stack,
     )?;
+
     assert_eq!(
-        final_config.guardian_developer_instructions.as_deref(),
-        Some("managed override")
-    );
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn system_config_overrides_guardian_developer_instructions() -> anyhow::Result<()> {
-    let codex_home = TempDir::new()?;
-    let user_file = AbsolutePathBuf::try_from(codex_home.path().join(CONFIG_TOML_FILE))?;
-    let system_file =
-        AbsolutePathBuf::try_from(codex_home.path().join("system").join(CONFIG_TOML_FILE))?;
-    let config_layer_stack = ConfigLayerStack::new(
-        vec![
-            ConfigLayerEntry::new(
-                ConfigLayerSource::System { file: system_file },
-                toml::from_str(
-                    "guardian_developer_instructions = \"\"\"\n  system override  \n\"\"\"\n",
-                )?,
-            ),
-            ConfigLayerEntry::new(
-                ConfigLayerSource::User { file: user_file },
-                toml::from_str(
-                    "guardian_developer_instructions = \"\"\"\nuser override\n\"\"\"\n",
-                )?,
-            ),
-        ],
-        Default::default(),
-        Default::default(),
-    )?;
-
-    let final_config = Config::load_config_with_layer_stack(
-        ConfigToml::default(),
-        ConfigOverrides {
-            cwd: Some(codex_home.path().to_path_buf()),
-            ..Default::default()
-        },
-        codex_home.path().to_path_buf(),
-        config_layer_stack,
-    )?;
-    assert_eq!(
-        final_config.guardian_developer_instructions.as_deref(),
-        Some("system override")
+        config.guardian_developer_instructions.as_deref(),
+        Some("Use the workspace-managed guardian policy.")
     );
 
     Ok(())
 }
 
 #[test]
-fn load_config_ignores_untrusted_legacy_managed_config_file_guardian_override()
--> std::io::Result<()> {
+fn load_config_ignores_empty_requirements_guardian_developer_instructions() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
-    let untrusted_managed_file =
-        AbsolutePathBuf::try_from(codex_home.path().join("managed_config.toml"))?;
-    let untrusted_managed_config =
-        toml::from_str("guardian_developer_instructions = \"\"\"\nshould be ignored\n\"\"\"\n")
-            .map_err(std::io::Error::other)?;
     let config_layer_stack = ConfigLayerStack::new(
-        vec![ConfigLayerEntry::new(
-            ConfigLayerSource::LegacyManagedConfigTomlFromFile {
-                file: untrusted_managed_file,
-            },
-            untrusted_managed_config,
-        )],
+        Vec::new(),
         Default::default(),
-        Default::default(),
-    )?;
+        crate::config_loader::ConfigRequirementsToml {
+            guardian_developer_instructions: Some("   ".to_string()),
+            ..Default::default()
+        },
+    )
+    .map_err(std::io::Error::other)?;
 
     let config = Config::load_config_with_layer_stack(
         ConfigToml::default(),
@@ -4848,6 +4770,7 @@ fn test_requirements_web_search_mode_allowlist_does_not_warn_when_unset() -> any
         rules: None,
         enforce_residency: None,
         network: None,
+        guardian_developer_instructions: None,
     };
     let requirement_source = crate::config_loader::RequirementSource::Unknown;
     let requirement_source_for_error = requirement_source.clone();
@@ -5447,6 +5370,7 @@ async fn explicit_sandbox_mode_falls_back_when_disallowed_by_requirements() -> s
         rules: None,
         enforce_residency: None,
         network: None,
+        guardian_developer_instructions: None,
     };
 
     let config = ConfigBuilder::default()
