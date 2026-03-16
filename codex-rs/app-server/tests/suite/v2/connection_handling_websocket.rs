@@ -155,7 +155,8 @@ async fn websocket_transport_verifies_signed_short_lived_bearer_tokens() -> Resu
     let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
     let shared_secret_file = codex_home.path().join("app-server-signing-secret");
-    std::fs::write(&shared_secret_file, "signed-secret\n")?;
+    let shared_secret = "0123456789abcdef0123456789abcdef";
+    std::fs::write(&shared_secret_file, format!("{shared_secret}\n"))?;
     create_config_toml(codex_home.path(), &server.uri(), "never")?;
     let auth_args = vec![
         "--ws-auth".to_string(),
@@ -173,7 +174,7 @@ async fn websocket_transport_verifies_signed_short_lived_bearer_tokens() -> Resu
     let (mut process, bind_addr) =
         spawn_websocket_server_with_args(codex_home.path(), "ws://127.0.0.1:0", &auth_args).await?;
     let expired_token = signed_bearer_token(
-        b"signed-secret",
+        shared_secret.as_bytes(),
         json!({
             "exp": OffsetDateTime::now_utc().unix_timestamp() - 30,
             "iss": "codex-enroller",
@@ -182,8 +183,52 @@ async fn websocket_transport_verifies_signed_short_lived_bearer_tokens() -> Resu
     )?;
     assert_websocket_connect_rejected(bind_addr, Some(expired_token.as_str())).await?;
 
+    let malformed_token = "codexv1.not-base64.not-base64";
+    assert_websocket_connect_rejected(bind_addr, Some(malformed_token)).await?;
+
+    let not_yet_valid_token = signed_bearer_token(
+        shared_secret.as_bytes(),
+        json!({
+            "exp": OffsetDateTime::now_utc().unix_timestamp() + 60,
+            "nbf": OffsetDateTime::now_utc().unix_timestamp() + 30,
+            "iss": "codex-enroller",
+            "aud": "codex-app-server",
+        }),
+    )?;
+    assert_websocket_connect_rejected(bind_addr, Some(not_yet_valid_token.as_str())).await?;
+
+    let wrong_issuer_token = signed_bearer_token(
+        shared_secret.as_bytes(),
+        json!({
+            "exp": OffsetDateTime::now_utc().unix_timestamp() + 60,
+            "iss": "someone-else",
+            "aud": "codex-app-server",
+        }),
+    )?;
+    assert_websocket_connect_rejected(bind_addr, Some(wrong_issuer_token.as_str())).await?;
+
+    let wrong_audience_token = signed_bearer_token(
+        shared_secret.as_bytes(),
+        json!({
+            "exp": OffsetDateTime::now_utc().unix_timestamp() + 60,
+            "iss": "codex-enroller",
+            "aud": "wrong-audience",
+        }),
+    )?;
+    assert_websocket_connect_rejected(bind_addr, Some(wrong_audience_token.as_str())).await?;
+
+    let wrong_signature_token = signed_bearer_token(
+        b"fedcba9876543210fedcba9876543210",
+        json!({
+            "exp": OffsetDateTime::now_utc().unix_timestamp() + 60,
+            "iss": "codex-enroller",
+            "aud": "codex-app-server",
+        }),
+    )?;
+    assert_websocket_connect_rejected(bind_addr, Some(wrong_signature_token.as_str())).await?;
+
     let valid_token = signed_bearer_token(
-        b"signed-secret",
+        shared_secret.as_bytes(),
         json!({
             "exp": OffsetDateTime::now_utc().unix_timestamp() + 60,
             "iss": "codex-enroller",
@@ -199,6 +244,38 @@ async fn websocket_transport_verifies_signed_short_lived_bearer_tokens() -> Resu
         .kill()
         .await
         .context("failed to stop websocket app-server process")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn websocket_transport_rejects_short_signed_bearer_secret_configuration() -> Result<()> {
+    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
+    let codex_home = TempDir::new()?;
+    let shared_secret_file = codex_home.path().join("app-server-signing-secret");
+    std::fs::write(&shared_secret_file, "too-short\n")?;
+    create_config_toml(codex_home.path(), &server.uri(), "never")?;
+
+    let output = run_websocket_server_to_completion_with_args(
+        codex_home.path(),
+        "ws://127.0.0.1:0",
+        &[
+            "--ws-auth".to_string(),
+            "signed-bearer-token".to_string(),
+            "--ws-shared-secret-file".to_string(),
+            shared_secret_file.display().to_string(),
+        ],
+    )
+    .await?;
+    assert!(
+        !output.status.success(),
+        "short shared secret should fail websocket server startup"
+    );
+    let stderr = String::from_utf8(output.stderr).context("stderr should be valid utf-8")?;
+    assert!(
+        stderr.contains("must be at least 32 bytes"),
+        "unexpected stderr: {stderr}"
+    );
+
     Ok(())
 }
 
@@ -372,11 +449,20 @@ async fn run_websocket_server_to_completion(
     codex_home: &Path,
     listen_url: &str,
 ) -> Result<std::process::Output> {
+    run_websocket_server_to_completion_with_args(codex_home, listen_url, &[]).await
+}
+
+async fn run_websocket_server_to_completion_with_args(
+    codex_home: &Path,
+    listen_url: &str,
+    extra_args: &[String],
+) -> Result<std::process::Output> {
     let program = codex_utils_cargo_bin::cargo_bin("codex-app-server")
         .context("should find app-server binary")?;
     let mut cmd = Command::new(program);
     cmd.arg("--listen")
         .arg(listen_url)
+        .args(extra_args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
