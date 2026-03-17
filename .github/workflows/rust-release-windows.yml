@@ -1,6 +1,7 @@
 name: rust-release-windows
 
 on:
+  workflow_dispatch:
   workflow_call:
     inputs:
       release-lto:
@@ -21,7 +22,50 @@ on:
         required: true
 
 jobs:
+  verify-windows-binaries:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    name: Build Windows verification binaries
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: codex-rs
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cargo build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --target x86_64-pc-windows-msvc --release \
+            --bin codex \
+            --bin codex-responses-api-proxy \
+            --bin codex-windows-sandbox-setup \
+            --bin codex-command-runner
+
+      - name: Stage Windows binaries
+        shell: bash
+        run: |
+          output_dir="target/x86_64-pc-windows-msvc/release/staged-issue-14015"
+          mkdir -p "$output_dir"
+          cp target/x86_64-pc-windows-msvc/release/codex.exe "$output_dir/codex.exe"
+          cp target/x86_64-pc-windows-msvc/release/codex-responses-api-proxy.exe "$output_dir/codex-responses-api-proxy.exe"
+          cp target/x86_64-pc-windows-msvc/release/codex-windows-sandbox-setup.exe "$output_dir/codex-windows-sandbox-setup.exe"
+          cp target/x86_64-pc-windows-msvc/release/codex-command-runner.exe "$output_dir/codex-command-runner.exe"
+
+      - name: Upload Windows binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: issue-14015-windows-binaries-x86_64-pc-windows-msvc
+          path: codex-rs/target/x86_64-pc-windows-msvc/release/staged-issue-14015/*
+
   build-windows-binaries:
+    if: ${{ github.event_name == 'workflow_call' }}
     name: Build Windows binaries - ${{ matrix.runner }} - ${{ matrix.target }} - ${{ matrix.bundle }}
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 60
@@ -119,6 +163,7 @@ jobs:
             codex-rs/target/${{ matrix.target }}/release/staged-${{ matrix.bundle }}/*
 
   build-windows:
+    if: ${{ github.event_name == 'workflow_call' }}
     needs:
       - build-windows-binaries
     name: Build - ${{ matrix.runner }} - ${{ matrix.target }}
