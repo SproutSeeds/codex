@@ -24,6 +24,8 @@ windows_modules!(
     workspace_acl
 );
 
+mod launch_guard;
+
 #[cfg(target_os = "windows")]
 #[path = "conpty/mod.rs"]
 mod conpty;
@@ -182,7 +184,10 @@ mod windows_impl {
     use super::env::apply_no_network_to_env;
     use super::env::ensure_non_interactive_pager;
     use super::env::normalize_null_device_env;
+    use super::launch_guard::current_process_token_context;
+    use super::launch_guard::LEGACY_SANDBOX_SETUP_REQUIRED_ERROR;
     use super::logging::log_failure;
+    use super::logging::log_note;
     use super::logging::log_start;
     use super::logging::log_success;
     use super::path_normalization::canonicalize_path;
@@ -269,20 +274,11 @@ mod windows_impl {
         use_private_desktop: bool,
     ) -> Result<CaptureResult> {
         let policy = parse_policy(policy_json_or_preset)?;
-        let apply_network_block = should_apply_network_block(&policy);
-        normalize_null_device_env(&mut env_map);
-        ensure_non_interactive_pager(&mut env_map);
-        if apply_network_block {
-            apply_no_network_to_env(&mut env_map)?;
-        }
         ensure_codex_home_exists(codex_home)?;
-        let current_dir = cwd.to_path_buf();
         let sandbox_base = codex_home.join(".sandbox");
         std::fs::create_dir_all(&sandbox_base)?;
         let logs_base_dir = Some(sandbox_base.as_path());
-        log_start(&command, logs_base_dir);
-        let is_workspace_write = matches!(&policy, SandboxPolicy::WorkspaceWrite { .. });
-
+        let apply_network_block = should_apply_network_block(&policy);
         if matches!(
             &policy,
             SandboxPolicy::DangerFullAccess | SandboxPolicy::ExternalSandbox { .. }
@@ -294,6 +290,60 @@ mod windows_impl {
                 "Restricted read-only access is not yet supported by the Windows sandbox backend"
             );
         }
+        match current_process_token_context() {
+            Ok(token_context) if token_context.needs_elevated_runner_fallback() => {
+                if super::sandbox_setup_is_complete(codex_home) {
+                    log_note(
+                        &format!(
+                            "legacy sandbox: session_id={} interactive={} remote_interactive={} network={} -> using elevated sandbox-user runner",
+                            token_context.session_id,
+                            token_context.has_interactive_sid,
+                            token_context.has_remote_interactive_sid,
+                            token_context.has_network_sid,
+                        ),
+                        logs_base_dir,
+                    );
+                    return super::run_windows_sandbox_capture_elevated(
+                        policy_json_or_preset,
+                        sandbox_policy_cwd,
+                        codex_home,
+                        command,
+                        cwd,
+                        env_map,
+                        timeout_ms,
+                        use_private_desktop,
+                    );
+                }
+                log_note(
+                    &format!(
+                        "legacy sandbox: session_id={} interactive={} remote_interactive={} network={} -> elevated setup required",
+                        token_context.session_id,
+                        token_context.has_interactive_sid,
+                        token_context.has_remote_interactive_sid,
+                        token_context.has_network_sid,
+                    ),
+                    logs_base_dir,
+                );
+                anyhow::bail!(LEGACY_SANDBOX_SETUP_REQUIRED_ERROR);
+            }
+            Ok(_) => {}
+            Err(err) => {
+                log_note(
+                    &format!(
+                        "legacy sandbox: token inspection failed; continuing legacy runner: {err}"
+                    ),
+                    logs_base_dir,
+                );
+            }
+        }
+        normalize_null_device_env(&mut env_map);
+        ensure_non_interactive_pager(&mut env_map);
+        if apply_network_block {
+            apply_no_network_to_env(&mut env_map)?;
+        }
+        let current_dir = cwd.to_path_buf();
+        log_start(&command, logs_base_dir);
+        let is_workspace_write = matches!(&policy, SandboxPolicy::WorkspaceWrite { .. });
         let caps = load_or_create_cap_sids(codex_home)?;
         let (h_token, psid_generic, psid_workspace): (HANDLE, *mut c_void, Option<*mut c_void>) = unsafe {
             match &policy {

@@ -1,4 +1,5 @@
 use crate::winutil::to_wide;
+use crate::winutil::string_from_sid_bytes;
 use anyhow::anyhow;
 use anyhow::Result;
 use std::ffi::c_void;
@@ -165,6 +166,81 @@ pub unsafe fn get_current_token_for_restriction() -> Result<HANDLE> {
         return Err(anyhow!("OpenProcessToken failed: {}", GetLastError()));
     }
     Ok(h)
+}
+
+unsafe fn token_group_sids(h_token: HANDLE) -> Result<Vec<Vec<u8>>> {
+    let mut needed: u32 = 0;
+    GetTokenInformation(h_token, TokenGroups, std::ptr::null_mut(), 0, &mut needed);
+    if needed == 0 {
+        return Err(anyhow!(
+            "GetTokenInformation(TokenGroups) size query failed: {}",
+            GetLastError()
+        ));
+    }
+
+    let mut buf: Vec<u8> = vec![0u8; needed as usize];
+    let ok = GetTokenInformation(
+        h_token,
+        TokenGroups,
+        buf.as_mut_ptr() as *mut c_void,
+        needed,
+        &mut needed,
+    );
+    if ok == 0 || (needed as usize) < std::mem::size_of::<u32>() {
+        return Err(anyhow!(
+            "GetTokenInformation(TokenGroups) failed: {}",
+            GetLastError()
+        ));
+    }
+
+    let group_count = std::ptr::read_unaligned(buf.as_ptr() as *const u32) as usize;
+    let after_count = unsafe { buf.as_ptr().add(std::mem::size_of::<u32>()) } as usize;
+    let align = std::mem::align_of::<SID_AND_ATTRIBUTES>();
+    let aligned = (after_count + (align - 1)) & !(align - 1);
+    let groups_ptr = aligned as *const SID_AND_ATTRIBUTES;
+    let mut groups = Vec::with_capacity(group_count);
+    for i in 0..group_count {
+        let entry: SID_AND_ATTRIBUTES = std::ptr::read_unaligned(groups_ptr.add(i));
+        let sid = entry.Sid;
+        let sid_len = GetLengthSid(sid);
+        if sid_len == 0 {
+            return Err(anyhow!("GetLengthSid returned 0 for token group SID"));
+        }
+        let mut out = vec![0u8; sid_len as usize];
+        if CopySid(sid_len, out.as_mut_ptr() as *mut c_void, sid) == 0 {
+            return Err(anyhow!("CopySid failed: {}", GetLastError()));
+        }
+        groups.push(out);
+    }
+    Ok(groups)
+}
+
+pub unsafe fn token_group_sid_strings(h_token: HANDLE) -> Result<Vec<String>> {
+    token_group_sids(h_token)?
+        .into_iter()
+        .map(|sid| string_from_sid_bytes(&sid).map_err(|err| anyhow!("{err}")))
+        .collect()
+}
+
+pub unsafe fn token_session_id(h_token: HANDLE) -> Result<u32> {
+    const TOKEN_SESSION_ID_CLASS: i32 = 12;
+
+    let mut session_id: u32 = 0;
+    let mut needed: u32 = 0;
+    let ok = GetTokenInformation(
+        h_token,
+        TOKEN_SESSION_ID_CLASS,
+        &mut session_id as *mut u32 as *mut c_void,
+        std::mem::size_of::<u32>() as u32,
+        &mut needed,
+    );
+    if ok == 0 {
+        return Err(anyhow!(
+            "GetTokenInformation(TokenSessionId) failed: {}",
+            GetLastError()
+        ));
+    }
+    Ok(session_id)
 }
 
 pub unsafe fn get_logon_sid_bytes(h_token: HANDLE) -> Result<Vec<u8>> {
