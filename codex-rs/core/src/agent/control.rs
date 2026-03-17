@@ -7,6 +7,7 @@ use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
 use crate::find_thread_path_by_id_str;
 use crate::rollout::RolloutRecorder;
+use crate::rollout::truncation::truncate_rollout_before_last_user_turn_segment;
 use crate::session_prefix::format_subagent_context_line;
 use crate::session_prefix::format_subagent_notification_message;
 use crate::shell_snapshot::ShellSnapshot;
@@ -165,10 +166,36 @@ impl AgentControl {
                                 "parent thread rollout unavailable for fork: {parent_thread_id}"
                             ))
                         })?;
+                    let parent_rollout_items = RolloutRecorder::get_rollout_history(&rollout_path)
+                        .await?
+                        .get_rollout_items();
                     let mut forked_rollout_items =
-                        RolloutRecorder::get_rollout_history(&rollout_path)
-                            .await?
-                            .get_rollout_items();
+                        truncate_rollout_before_last_user_turn_segment(&parent_rollout_items);
+                    let has_parent_spawn_call = forked_rollout_items.iter().any(|item| {
+                        matches!(
+                            item,
+                            RolloutItem::ResponseItem(ResponseItem::FunctionCall {
+                                call_id: item_call_id,
+                                ..
+                            }) if item_call_id == call_id
+                        )
+                    });
+                    if !has_parent_spawn_call
+                        && let Some(parent_spawn_call) =
+                            parent_rollout_items.iter().find_map(|item| match item {
+                                RolloutItem::ResponseItem(
+                                    response_item @ ResponseItem::FunctionCall {
+                                        call_id: item_call_id,
+                                        ..
+                                    },
+                                ) if item_call_id == call_id => {
+                                    Some(RolloutItem::ResponseItem(response_item.clone()))
+                                }
+                                _ => None,
+                            })
+                    {
+                        forked_rollout_items.push(parent_spawn_call);
+                    }
                     let mut output = FunctionCallOutputPayload::from_text(
                         FORKED_SPAWN_AGENT_OUTPUT_MESSAGE.to_string(),
                     );

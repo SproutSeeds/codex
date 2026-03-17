@@ -58,6 +58,30 @@ fn text_input(text: &str) -> Vec<UserInput> {
     }]
 }
 
+fn assistant_message(text: &str) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "assistant".to_string(),
+        content: vec![ContentItem::OutputText {
+            text: text.to_string(),
+        }],
+        end_turn: None,
+        phase: None,
+    }
+}
+
+fn user_message(text: &str) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: text.to_string(),
+        }],
+        end_turn: None,
+        phase: None,
+    }
+}
+
 struct AgentControlHarness {
     _home: TempDir,
     config: Config,
@@ -377,13 +401,14 @@ async fn spawn_agent_creates_thread_and_sends_prompt() {
 }
 
 #[tokio::test]
-async fn spawn_agent_can_fork_parent_thread_history() {
+async fn spawn_agent_fork_keeps_background_context_but_drops_parent_live_directive() {
     let harness = AgentControlHarness::new().await;
     let (parent_thread_id, parent_thread) = harness.start_thread().await;
     parent_thread
         .inject_user_message_without_turn("parent seed context".to_string())
         .await;
     let turn_context = parent_thread.codex.session.new_default_turn().await;
+    let parent_live_directive = "spawn specialized subagents for this task";
     let parent_spawn_call_id = "spawn-call-history".to_string();
     let parent_spawn_call = ResponseItem::FunctionCall {
         id: None,
@@ -395,7 +420,14 @@ async fn spawn_agent_can_fork_parent_thread_history() {
     parent_thread
         .codex
         .session
-        .record_conversation_items(turn_context.as_ref(), &[parent_spawn_call])
+        .record_conversation_items(
+            turn_context.as_ref(),
+            &[
+                assistant_message("seed acknowledged"),
+                user_message(parent_live_directive),
+                parent_spawn_call,
+            ],
+        )
         .await;
     parent_thread
         .codex
@@ -432,6 +464,14 @@ async fn spawn_agent_can_fork_parent_thread_history() {
     assert!(history_contains_text(
         history.raw_items(),
         "parent seed context"
+    ));
+    assert!(history_contains_text(
+        history.raw_items(),
+        "seed acknowledged"
+    ));
+    assert!(!history_contains_text(
+        history.raw_items(),
+        parent_live_directive
     ));
 
     let expected = (

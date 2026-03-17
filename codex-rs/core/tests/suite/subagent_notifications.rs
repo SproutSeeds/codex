@@ -379,6 +379,7 @@ async fn spawned_child_receives_forked_parent_context() -> Result<()> {
     };
     assert!(body_contains(&child_request, TURN_0_FORK_PROMPT));
     assert!(body_contains(&child_request, "seeded"));
+    assert!(!body_contains(&child_request, TURN_1_PROMPT));
 
     let child_body = child_request
         .body_json::<serde_json::Value>()
@@ -392,6 +393,224 @@ async fn spawned_child_receives_forked_parent_context() -> Result<()> {
             })
         })
         .unwrap_or_else(|| panic!("expected forked child request to include spawn_agent output"));
+    let (content, success) = match &function_call_output["output"] {
+        serde_json::Value::String(text) => (Some(text.as_str()), None),
+        serde_json::Value::Object(output) => (
+            output.get("content").and_then(serde_json::Value::as_str),
+            output.get("success").and_then(serde_json::Value::as_bool),
+        ),
+        _ => (None, None),
+    };
+    assert_eq!(content, Some(FORKED_SPAWN_AGENT_OUTPUT_MESSAGE));
+    assert_ne!(success, Some(false));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spawned_grandchild_drops_intermediate_live_delegation_directive() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let child_orchestrator_prompt = "child: spawn three specialists for this task";
+    let grandchild_prompt = "grandchild: solve one specialist task";
+    let parent_spawn_call_id = "spawn-parent-1";
+    let child_spawn_call_id = "spawn-child-1";
+
+    let server = start_mock_server().await;
+
+    let seed_turn = mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| body_contains(req, TURN_0_FORK_PROMPT),
+        sse(vec![
+            ev_response_created("resp-seed-1"),
+            ev_assistant_message("msg-seed-1", "seeded"),
+            ev_completed("resp-seed-1"),
+        ]),
+    )
+    .await;
+
+    let parent_spawn_args = serde_json::to_string(&json!({
+        "message": child_orchestrator_prompt,
+        "fork_context": true,
+    }))?;
+    let spawn_turn = mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| body_contains(req, TURN_1_PROMPT),
+        sse(vec![
+            ev_response_created("resp-turn1-1"),
+            ev_function_call(parent_spawn_call_id, "spawn_agent", &parent_spawn_args),
+            ev_completed("resp-turn1-1"),
+        ]),
+    )
+    .await;
+
+    let child_spawn_args = serde_json::to_string(&json!({
+        "message": grandchild_prompt,
+        "fork_context": true,
+    }))?;
+    let _child_request_log = mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| {
+            body_contains(req, child_orchestrator_prompt)
+                && body_contains(req, FORKED_SPAWN_AGENT_OUTPUT_MESSAGE)
+                && !body_contains(req, child_spawn_call_id)
+        },
+        sse(vec![
+            ev_response_created("resp-child-1"),
+            ev_function_call(child_spawn_call_id, "spawn_agent", &child_spawn_args),
+            ev_completed("resp-child-1"),
+        ]),
+    )
+    .await;
+
+    let _grandchild_request_log = mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| {
+            body_contains(req, grandchild_prompt)
+                && body_contains(req, FORKED_SPAWN_AGENT_OUTPUT_MESSAGE)
+        },
+        sse(vec![
+            ev_response_created("resp-grandchild-1"),
+            ev_assistant_message("msg-grandchild-1", "grandchild done"),
+            ev_completed("resp-grandchild-1"),
+        ]),
+    )
+    .await;
+
+    let _child_followup = mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| body_contains(req, child_spawn_call_id),
+        sse(vec![
+            ev_response_created("resp-child-2"),
+            ev_assistant_message("msg-child-2", "child done"),
+            ev_completed("resp-child-2"),
+        ]),
+    )
+    .await;
+
+    let _turn1_followup = mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| {
+            body_contains(req, parent_spawn_call_id) && !body_contains(req, child_spawn_call_id)
+        },
+        sse(vec![
+            ev_response_created("resp-turn1-2"),
+            ev_assistant_message("msg-turn1-2", "parent done"),
+            ev_completed("resp-turn1-2"),
+        ]),
+    )
+    .await;
+
+    let mut builder = test_codex().with_config(|config| {
+        config
+            .features
+            .enable(Feature::Collab)
+            .expect("test config should allow feature update");
+        config.agent_max_depth = 3;
+    });
+    let test = builder.build(&server).await?;
+
+    test.submit_turn(TURN_0_FORK_PROMPT).await?;
+    let _ = seed_turn.single_request();
+
+    test.submit_turn(TURN_1_PROMPT).await?;
+    let _ = spawn_turn.single_request();
+
+    let grandchild_request_matches = |request: &wiremock::Request| {
+        let Ok(body) = request.body_json::<serde_json::Value>() else {
+            return false;
+        };
+        let Some(items) = body.get("input").and_then(serde_json::Value::as_array) else {
+            return false;
+        };
+
+        let has_grandchild_user_message = items.iter().any(|item| {
+            item.get("type").and_then(serde_json::Value::as_str) == Some("message")
+                && item.get("role").and_then(serde_json::Value::as_str) == Some("user")
+                && item
+                    .get("content")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|content| {
+                        content.iter().any(|entry| {
+                            entry.get("text").and_then(serde_json::Value::as_str)
+                                == Some(grandchild_prompt)
+                        })
+                    })
+        });
+
+        let has_forked_child_spawn_output = items.iter().any(|item| {
+            item.get("type").and_then(serde_json::Value::as_str) == Some("function_call_output")
+                && item.get("call_id").and_then(serde_json::Value::as_str)
+                    == Some(child_spawn_call_id)
+                && match item.get("output") {
+                    Some(serde_json::Value::String(text)) => {
+                        text == FORKED_SPAWN_AGENT_OUTPUT_MESSAGE
+                    }
+                    Some(serde_json::Value::Object(output)) => {
+                        output.get("content").and_then(serde_json::Value::as_str)
+                            == Some(FORKED_SPAWN_AGENT_OUTPUT_MESSAGE)
+                    }
+                    _ => false,
+                }
+        });
+
+        has_grandchild_user_message && has_forked_child_spawn_output
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let grandchild_request = loop {
+        if let Some(request) = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .find(grandchild_request_matches)
+        {
+            break request;
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for forked grandchild request");
+        }
+        sleep(Duration::from_millis(10)).await;
+    };
+
+    assert!(body_contains(&grandchild_request, TURN_0_FORK_PROMPT));
+    assert!(body_contains(&grandchild_request, "seeded"));
+    assert!(!body_contains(&grandchild_request, TURN_1_PROMPT));
+
+    let grandchild_body = grandchild_request
+        .body_json::<serde_json::Value>()
+        .expect("forked grandchild request body should be json");
+    let grandchild_user_texts = grandchild_body["input"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| {
+            item["type"].as_str() == Some("message") && item["role"].as_str() == Some("user")
+        })
+        .flat_map(|item| {
+            item["content"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| entry["text"].as_str())
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !grandchild_user_texts.contains(&child_orchestrator_prompt),
+        "grandchild user texts leaked intermediate live delegation turn: {grandchild_user_texts:?}"
+    );
+    let function_call_output = grandchild_body["input"]
+        .as_array()
+        .and_then(|items| {
+            items.iter().find(|item| {
+                item["type"].as_str() == Some("function_call_output")
+                    && item["call_id"].as_str() == Some(child_spawn_call_id)
+            })
+        })
+        .unwrap_or_else(|| {
+            panic!("expected forked grandchild request to include child spawn_agent output")
+        });
     let (content, success) = match &function_call_output["output"] {
         serde_json::Value::String(text) => (Some(text.as_str()), None),
         serde_json::Value::Object(output) => (
