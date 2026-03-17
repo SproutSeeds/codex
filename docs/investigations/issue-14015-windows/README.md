@@ -4,7 +4,7 @@ This packet is a clean handoff for `openai/codex` issue `#14015`:
 
 - issue: <https://github.com/openai/codex/issues/14015>
 - branch intent: preserve the current Windows investigation state so it can be pulled onto a Windows machine directly
-- current status: reproduced and narrowed; a candidate patch is committed in this branch, and Windows verification is still pending
+- current status: reproduced and narrowed; the candidate patch is now verified on Umbra's SSH / network-logon path for the setup-missing case
 
 ## What We Proved
 
@@ -47,7 +47,33 @@ The relevant code changes are:
 - `codex-rs/windows-sandbox-rs/src/token.rs`
 - `codex-rs/windows-sandbox-rs/src/launch_guard.rs`
 
-This is still not a validated fix until it is re-run against the Windows SSH / network-logon repro on the host machine.
+This is now validated on Umbra's Windows SSH / network-logon repro for the
+setup-missing case. The remaining optional follow-up is a fresh local
+interactive recheck with the patched binary, but the original failing path is
+already covered.
+
+## Verified Result On Umbra
+
+On March 17, 2026, I rebuilt the branch as a Windows debug artifact from commit
+`ce5781c` using GitHub Actions and re-ran the SSH / network-logon probe on
+Umbra.
+
+Host state before the repro:
+
+- `C:\\Users\\codyr\\.codex\\.sandbox\\setup_marker.json` was missing
+- `C:\\Users\\codyr\\.codex\\.sandbox-secrets\\sandbox_users.json` was missing
+
+Observed result:
+
+- every probe command returned the new targeted setup-required error with `EXIT=1`
+- that included direct `powershell.exe`, direct `dotnet.exe --info`, direct `cmd.exe /c echo ok`, direct `reg.exe query HKCU\\Environment`, and the child `powershell.exe` / `dotnet.exe` / `whoami /groups` commands through sandboxed `cmd.exe`
+- the old SSH / network-logon failure pattern did not reproduce
+- `C:\\Users\\codyr\\.codex\\.sandbox\\sandbox.log` showed repeated:
+  `legacy sandbox: session_id=0 interactive=false remote_interactive=false network=true -> elevated setup required`
+
+Result classification:
+
+- `clean targeted failure because setup is missing`
 
 ## Expected Outcome After Patch
 
