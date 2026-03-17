@@ -9,6 +9,8 @@ use crate::features::Feature;
 use crate::guardian::GuardianApprovalRequest;
 use crate::guardian::review_approval_request;
 use crate::guardian::routes_approval_to_guardian;
+use crate::path_utils;
+use crate::sandboxing::merge_permission_profiles;
 use crate::sandboxing::ExecRequest;
 use crate::sandboxing::SandboxPermissions;
 use crate::shell::ShellType;
@@ -62,6 +64,15 @@ pub(crate) struct PreparedUnifiedExecZshFork {
     pub(crate) escalation_session: EscalationSession,
 }
 
+enum DirectSkillScriptOverride {
+    Denied(ExecToolCallOutput),
+    RunDirect {
+        command: Vec<String>,
+        additional_permissions: PermissionProfile,
+        network: Option<codex_network_proxy::NetworkProxy>,
+    },
+}
+
 const PROMPT_CONFLICT_REASON: &str =
     "approval required by policy, but AskForApproval is set to Never";
 const REJECT_SANDBOX_APPROVAL_REASON: &str =
@@ -106,7 +117,111 @@ pub(super) async fn try_run_zsh_fork(
         return Ok(None);
     }
 
-    let spec = build_command_spec(
+    let workdir = AbsolutePathBuf::try_from(req.cwd.clone())
+        .map_err(|err| ToolError::Rejected(err.to_string()))?;
+    let base_spec = build_command_spec(
+        command,
+        &req.cwd,
+        &req.env,
+        req.timeout_ms.into(),
+        req.sandbox_permissions,
+        req.additional_permissions.clone(),
+        req.justification.clone(),
+    )?;
+    let base_sandbox_exec_request = attempt
+        .env_for(base_spec, req.network.as_ref())
+        .map_err(|err| ToolError::Codex(err.into()))?;
+    let ParsedShellCommand { script, login, .. } = extract_shell_script(&command)?;
+    let effective_timeout = Duration::from_millis(
+        req.timeout_ms
+            .unwrap_or(crate::exec::DEFAULT_EXEC_COMMAND_TIMEOUT_MS),
+    );
+    let exec_policy = Arc::new(RwLock::new(
+        ctx.session.services.exec_policy.current().as_ref().clone(),
+    ));
+    let main_execve_wrapper_exe = ctx
+        .session
+        .services
+        .main_execve_wrapper_exe
+        .clone()
+        .ok_or_else(|| {
+            ToolError::Rejected(
+                "zsh fork feature enabled, but execve wrapper is not configured".to_string(),
+            )
+        })?;
+    let exec_params = ExecParams {
+        command: script.clone(),
+        workdir: req.cwd.to_string_lossy().to_string(),
+        timeout_ms: Some(effective_timeout.as_millis() as u64),
+        login: Some(login),
+    };
+
+    // Note that Stopwatch starts immediately upon creation, so currently we try
+    // to minimize the time between creating the Stopwatch and starting the
+    // escalation server.
+    let stopwatch = Stopwatch::new(effective_timeout);
+    let cancel_token = stopwatch.cancellation_token();
+    let base_approval_sandbox_permissions = approval_sandbox_permissions(
+        req.sandbox_permissions,
+        req.additional_permissions_preapproved,
+    );
+    let base_escalation_policy = CoreShellActionProvider {
+        policy: Arc::clone(&exec_policy),
+        session: Arc::clone(&ctx.session),
+        turn: Arc::clone(&ctx.turn),
+        call_id: ctx.call_id.clone(),
+        tool_name: "shell",
+        approval_policy: ctx.turn.approval_policy.value(),
+        sandbox_policy: base_sandbox_exec_request.sandbox_policy.clone(),
+        file_system_sandbox_policy: base_sandbox_exec_request.file_system_sandbox_policy.clone(),
+        network_sandbox_policy: base_sandbox_exec_request.network_sandbox_policy,
+        sandbox_permissions: req.sandbox_permissions,
+        approval_sandbox_permissions: base_approval_sandbox_permissions,
+        prompt_permissions: req.additional_permissions.clone(),
+        stopwatch: stopwatch.clone(),
+    };
+    match resolve_direct_skill_script_override(
+        &base_escalation_policy,
+        &script,
+        &workdir,
+        req.additional_permissions.as_ref(),
+    )
+    .await
+    .map_err(|err| ToolError::Rejected(err.to_string()))?
+    {
+        Some(DirectSkillScriptOverride::Denied(output)) => return Ok(Some(output)),
+        Some(DirectSkillScriptOverride::RunDirect {
+            command,
+            additional_permissions,
+            network,
+        }) => {
+            let direct_network = network.or_else(|| req.network.clone());
+            let direct_spec = build_command_spec(
+                &command,
+                &req.cwd,
+                &req.env,
+                req.timeout_ms.into(),
+                SandboxPermissions::WithAdditionalPermissions,
+                Some(additional_permissions),
+                req.justification.clone(),
+            )?;
+            let direct_exec_request = attempt
+                .env_for(direct_spec, direct_network.as_ref())
+                .map_err(|err| ToolError::Codex(err.into()))?;
+            log_sandbox_exec_command(
+                "zsh_fork.run.direct_skill_script_override",
+                &direct_exec_request.command,
+                &direct_exec_request.cwd,
+                direct_exec_request.arg0.as_deref(),
+            );
+            let result = crate::sandboxing::execute_env(direct_exec_request, None)
+                .await
+                .map_err(|err| ToolError::Rejected(err.to_string()))?;
+            return Ok(Some(result));
+        }
+        None => {}
+    }
+    let final_spec = build_command_spec(
         command,
         &req.cwd,
         &req.env,
@@ -116,7 +231,7 @@ pub(super) async fn try_run_zsh_fork(
         req.justification.clone(),
     )?;
     let sandbox_exec_request = attempt
-        .env_for(spec, req.network.as_ref())
+        .env_for(final_spec, req.network.as_ref())
         .map_err(|err| ToolError::Codex(err.into()))?;
     let crate::sandboxing::ExecRequest {
         command,
@@ -134,14 +249,6 @@ pub(super) async fn try_run_zsh_fork(
         justification,
         arg0,
     } = sandbox_exec_request;
-    let ParsedShellCommand { script, login, .. } = extract_shell_script(&command)?;
-    let effective_timeout = Duration::from_millis(
-        req.timeout_ms
-            .unwrap_or(crate::exec::DEFAULT_EXEC_COMMAND_TIMEOUT_MS),
-    );
-    let exec_policy = Arc::new(RwLock::new(
-        ctx.session.services.exec_policy.current().as_ref().clone(),
-    ));
     let command_executor = CoreShellCommandExecutor {
         command,
         cwd: sandbox_cwd,
@@ -165,32 +272,6 @@ pub(super) async fn try_run_zsh_fork(
         codex_linux_sandbox_exe: ctx.turn.codex_linux_sandbox_exe.clone(),
         use_legacy_landlock: ctx.turn.features.use_legacy_landlock(),
     };
-    let main_execve_wrapper_exe = ctx
-        .session
-        .services
-        .main_execve_wrapper_exe
-        .clone()
-        .ok_or_else(|| {
-            ToolError::Rejected(
-                "zsh fork feature enabled, but execve wrapper is not configured".to_string(),
-            )
-        })?;
-    let exec_params = ExecParams {
-        command: script,
-        workdir: req.cwd.to_string_lossy().to_string(),
-        timeout_ms: Some(effective_timeout.as_millis() as u64),
-        login: Some(login),
-    };
-
-    // Note that Stopwatch starts immediately upon creation, so currently we try
-    // to minimize the time between creating the Stopwatch and starting the
-    // escalation server.
-    let stopwatch = Stopwatch::new(effective_timeout);
-    let cancel_token = stopwatch.cancellation_token();
-    let approval_sandbox_permissions = approval_sandbox_permissions(
-        req.sandbox_permissions,
-        req.additional_permissions_preapproved,
-    );
     let escalation_policy = CoreShellActionProvider {
         policy: Arc::clone(&exec_policy),
         session: Arc::clone(&ctx.session),
@@ -202,11 +283,13 @@ pub(super) async fn try_run_zsh_fork(
         file_system_sandbox_policy: command_executor.file_system_sandbox_policy.clone(),
         network_sandbox_policy: command_executor.network_sandbox_policy,
         sandbox_permissions: req.sandbox_permissions,
-        approval_sandbox_permissions,
+        approval_sandbox_permissions: approval_sandbox_permissions(
+            req.sandbox_permissions,
+            req.additional_permissions_preapproved,
+        ),
         prompt_permissions: req.additional_permissions.clone(),
         stopwatch: stopwatch.clone(),
     };
-
     let escalate_server = EscalateServer::new(
         shell_zsh_path.clone(),
         main_execve_wrapper_exe,
@@ -663,6 +746,14 @@ impl EscalationPolicy for CoreShellActionProvider {
             // turn sandbox directly; skills with declared permissions still
             // prompt here before applying their permission profile.
             let prompt_permissions = skill.permission_profile.clone();
+            tracing::debug!(
+                program = %program.as_path().display(),
+                skill_name = skill.name,
+                skill_path = %skill.path_to_skills_md.display(),
+                has_permission_profile = prompt_permissions.is_some(),
+                has_managed_network_override = skill.managed_network_override.is_some(),
+                "Matched intercepted program to skill"
+            );
             if prompt_permissions
                 .as_ref()
                 .is_none_or(PermissionProfile::is_empty)
@@ -692,6 +783,11 @@ impl EscalationPolicy for CoreShellActionProvider {
                 )
                 .await;
         }
+        tracing::debug!(
+            program = %program.as_path().display(),
+            turn_cwd = %self.turn.cwd.display(),
+            "No skill matched intercepted program; falling back to intercepted exec policy evaluation"
+        );
 
         let evaluation = {
             let policy = self.policy.read().await;
@@ -896,6 +992,13 @@ impl ShellCommandExecutor for CoreShellCommandExecutor {
             }
         }
 
+        log_sandbox_exec_command(
+            "zsh_fork.run.turn_default_exec_request",
+            &self.command,
+            &self.cwd,
+            self.arg0.as_deref(),
+        );
+
         let result = crate::sandboxing::execute_exec_request_with_after_spawn(
             crate::sandboxing::ExecRequest {
                 command: self.command.clone(),
@@ -1068,6 +1171,13 @@ impl CoreShellCommandExecutor {
             network.apply_to_env(&mut exec_request.env);
         }
 
+        log_sandbox_exec_command(
+            "zsh_fork.prepare_escalated_exec",
+            &exec_request.command,
+            &exec_request.cwd,
+            exec_request.arg0.as_deref(),
+        );
+
         Ok(PreparedExec {
             command: exec_request.command,
             cwd: exec_request.cwd,
@@ -1150,6 +1260,239 @@ fn join_program_and_argv(program: &AbsolutePathBuf, argv: &[String]) -> Vec<Stri
         .collect::<Vec<_>>()
 }
 
+fn log_sandbox_exec_command(context: &str, command: &[String], cwd: &Path, arg0: Option<&str>) {
+    tracing::debug!(
+        target: "codex_core::tools::runtimes::shell::unix_escalation",
+        context,
+        cwd = %cwd.display(),
+        ?arg0,
+        ?command,
+        "zsh-fork sandbox command"
+    );
+
+    #[cfg(target_os = "macos")]
+    if let Some((policy, target_command)) = extract_inline_seatbelt_policy(command) {
+        tracing::debug!(
+            target: "codex_core::tools::runtimes::shell::unix_escalation",
+            context,
+            seatbelt_target = ?target_command,
+            seatbelt_policy = %policy,
+            "zsh-fork inline seatbelt policy"
+        );
+    }
+}
+
+async fn resolve_direct_skill_script_override(
+    action_provider: &CoreShellActionProvider,
+    script: &str,
+    workdir: &AbsolutePathBuf,
+    additional_permissions: Option<&PermissionProfile>,
+) -> anyhow::Result<Option<DirectSkillScriptOverride>> {
+    let Some((program, argv)) = resolve_direct_shell_command(script, workdir) else {
+        tracing::debug!(
+            script,
+            cwd = %workdir.display(),
+            "Direct skill script prelaunch matching skipped: shell script did not resolve to a single direct command"
+        );
+        return Ok(None);
+    };
+    tracing::debug!(
+        script,
+        cwd = %workdir.display(),
+        resolved_program = %program.as_path().display(),
+        resolved_argv = ?argv,
+        "Direct skill script prelaunch matching resolved shell script to direct command"
+    );
+    let Some(skill) = action_provider.find_skill(&program).await else {
+        tracing::debug!(
+            script,
+            cwd = %workdir.display(),
+            resolved_program = %program.as_path().display(),
+            "Direct skill script prelaunch matching found no skill for resolved command"
+        );
+        return Ok(None);
+    };
+    tracing::debug!(
+        script,
+        cwd = %workdir.display(),
+        resolved_program = %program.as_path().display(),
+        skill_name = skill.name,
+        skill_path = %skill.path_to_skills_md.display(),
+        "Direct skill script prelaunch matching resolved command to skill"
+    );
+
+    match action_provider
+        .determine_action(&program, &argv, workdir)
+        .await?
+    {
+        EscalationDecision::Deny { reason } => Ok(Some(DirectSkillScriptOverride::Denied(
+            denied_exec_tool_call_output(reason.as_deref()),
+        ))),
+        EscalationDecision::Escalate(EscalationExecution::Permissions(
+            EscalationPermissions::PermissionProfile(permission_profile),
+        )) => Ok(Some(DirectSkillScriptOverride::RunDirect {
+            command: join_program_and_argv(&program, &argv),
+            additional_permissions: merge_permission_profiles(
+                additional_permissions,
+                Some(&permission_profile),
+            )
+            .unwrap_or(permission_profile),
+            network: action_provider
+                .session
+                .get_or_start_skill_network_proxy(&skill)
+                .await?,
+        })),
+        EscalationDecision::Escalate(EscalationExecution::Permissions(
+            EscalationPermissions::Permissions(_),
+        ))
+        | EscalationDecision::Escalate(EscalationExecution::TurnDefault)
+        | EscalationDecision::Escalate(EscalationExecution::Unsandboxed)
+        | EscalationDecision::Run => Ok(None),
+    }
+}
+
+fn resolve_direct_shell_command(
+    script: &str,
+    workdir: &AbsolutePathBuf,
+) -> Option<(AbsolutePathBuf, Vec<String>)> {
+    let command = parse_direct_shell_command(script)?;
+    let (program, args) = command.split_first()?;
+    let program_path = Path::new(program);
+    if !program_path.is_absolute() && !program.contains('/') {
+        return None;
+    }
+    let program = if program_path.is_absolute() {
+        AbsolutePathBuf::from_absolute_path(program_path).ok()?
+    } else {
+        AbsolutePathBuf::resolve_path_against_base(program_path, workdir.as_path()).ok()?
+    };
+    let normalized_program = path_utils::normalize_for_path_comparison(program.as_path())
+        .ok()
+        .and_then(|path| AbsolutePathBuf::from_absolute_path(path).ok())
+        .unwrap_or(program);
+    let argv = std::iter::once(normalized_program.to_string_lossy().to_string())
+        .chain(args.iter().cloned())
+        .collect::<Vec<_>>();
+    Some((normalized_program, argv))
+}
+
+fn parse_direct_shell_command(script: &str) -> Option<Vec<String>> {
+    let shell_command = vec!["zsh".to_string(), "-c".to_string(), script.to_string()];
+    if let Some(commands) = parse_shell_lc_plain_commands(&shell_command) {
+        let [command] = commands.as_slice() else {
+            return None;
+        };
+        return Some(command.clone());
+    }
+    if let Some(command) = parse_shell_lc_single_command_prefix(&shell_command) {
+        return Some(command);
+    }
+    if script.contains("/.codex/shell_snapshots/") {
+        let tail = script
+            .rsplit("\n\n")
+            .find(|chunk| !chunk.trim().is_empty() && *chunk != script)?;
+        tracing::debug!(
+            shell_script = script,
+            snapshot_tail = tail,
+            "Direct skill script parser examining shell snapshot tail command"
+        );
+        let tail_shell_command = vec!["zsh".to_string(), "-c".to_string(), tail.to_string()];
+        if let Some(commands) = parse_shell_lc_plain_commands(&tail_shell_command) {
+            let [command] = commands.as_slice() else {
+                return None;
+            };
+            return Some(command.clone());
+        }
+    }
+    None
+}
+
+fn denied_exec_tool_call_output(reason: Option<&str>) -> ExecToolCallOutput {
+    let stderr = reason
+        .map(|reason| format!("Execution denied: {reason}\n"))
+        .unwrap_or_else(|| "Execution denied\n".to_string());
+    ExecToolCallOutput {
+        exit_code: 1,
+        stderr: crate::exec::StreamOutput::new(stderr.clone()),
+        aggregated_output: crate::exec::StreamOutput::new(stderr),
+        ..Default::default()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn extract_inline_seatbelt_policy(command: &[String]) -> Option<(&str, &[String])> {
+    let [sandbox_exec, flag, policy, target_command @ ..] = command else {
+        return None;
+    };
+    if sandbox_exec != "/usr/bin/sandbox-exec" || flag != "-p" {
+        return None;
+    }
+    Some((policy.as_str(), target_command))
+}
+
+async fn find_skill_for_program(
+    session: &crate::codex::Session,
+    cwd: &Path,
+    program: &AbsolutePathBuf,
+) -> Option<SkillMetadata> {
+    let force_reload = false;
+    let skills_outcome = session
+        .services
+        .skills_manager
+        .skills_for_cwd(cwd, force_reload)
+        .await;
+    let loaded_skills = skills_outcome
+        .skills
+        .iter()
+        .map(|skill| {
+            let scripts_root = skill
+                .path_to_skills_md
+                .parent()
+                .map(|path| path.join("scripts"))
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<missing-parent>".to_string());
+            format!(
+                "name={} skill_path={} scripts_root={} has_permission_profile={} has_managed_network_override={}",
+                skill.name,
+                skill.path_to_skills_md.display(),
+                scripts_root,
+                skill.permission_profile.is_some(),
+                skill.managed_network_override.is_some(),
+            )
+        })
+        .collect::<Vec<_>>();
+    tracing::debug!(
+        cwd = %cwd.display(),
+        program = %program.as_path().display(),
+        skill_count = skills_outcome.skills.len(),
+        error_count = skills_outcome.errors.len(),
+        skills = ?loaded_skills,
+        "Loaded skills for intercepted exec skill lookup"
+    );
+
+    let program_path = program.as_path();
+    for skill in skills_outcome.skills {
+        let Some(skill_root) = skill.path_to_skills_md.parent() else {
+            continue;
+        };
+        if program_path.starts_with(skill_root.join("scripts")) {
+            tracing::debug!(
+                program = %program_path.display(),
+                skill_name = skill.name,
+                skill_path = %skill.path_to_skills_md.display(),
+                "Skill lookup matched intercepted program"
+            );
+            return Some(skill);
+        }
+    }
+
+    tracing::debug!(
+        cwd = %cwd.display(),
+        program = %program_path.display(),
+        "Skill lookup found no matching intercepted program"
+    );
+    None
+}
 #[cfg(test)]
 #[path = "unix_escalation_tests.rs"]
 mod tests;
