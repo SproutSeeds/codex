@@ -7,6 +7,7 @@ use rand::Rng;
 use tracing::debug;
 use tracing::error;
 
+use crate::auth_env_telemetry::AuthEnvTelemetry;
 use crate::parse_command::shlex_join;
 
 const INITIAL_DELAY_MS: u64 = 200;
@@ -78,8 +79,40 @@ impl<'a> Auth401FeedbackSnapshot<'a> {
 }
 
 pub(crate) fn emit_feedback_request_tags(tags: &FeedbackRequestTags<'_>) {
+    emit_feedback_request_tags_inner(tags, None);
+}
+
+pub(crate) fn emit_feedback_request_tags_with_auth_env(
+    tags: &FeedbackRequestTags<'_>,
+    auth_env: &AuthEnvTelemetry,
+) {
+    emit_feedback_request_tags_inner(tags, Some(auth_env));
+}
+
+fn emit_feedback_request_tags_inner(
+    tags: &FeedbackRequestTags<'_>,
+    auth_env: Option<&AuthEnvTelemetry>,
+) {
     let auth_header_name = tags.auth_header_name.unwrap_or("");
     let auth_mode = tags.auth_mode.unwrap_or("");
+    let auth_env_openai_api_key_present = auth_env.map_or_else(String::new, |value| {
+        value.openai_api_key_env_present.to_string()
+    });
+    let auth_env_codex_api_key_present = auth_env.map_or_else(String::new, |value| {
+        value.codex_api_key_env_present.to_string()
+    });
+    let auth_env_codex_api_key_enabled = auth_env.map_or_else(String::new, |value| {
+        value.codex_api_key_env_enabled.to_string()
+    });
+    let auth_env_provider_key_name = auth_env
+        .and_then(|value| value.provider_env_key_name.as_deref())
+        .unwrap_or("");
+    let auth_env_provider_key_present = auth_env
+        .and_then(|value| value.provider_env_key_present)
+        .map_or_else(String::new, |value| value.to_string());
+    let auth_env_refresh_token_url_override_present = auth_env.map_or_else(String::new, |value| {
+        value.refresh_token_url_override_present.to_string()
+    });
     let auth_retry_after_unauthorized = tags
         .auth_retry_after_unauthorized
         .map_or_else(String::new, |value| value.to_string());
@@ -103,6 +136,12 @@ pub(crate) fn emit_feedback_request_tags(tags: &FeedbackRequestTags<'_>) {
         auth_header_attached = tags.auth_header_attached,
         auth_header_name = auth_header_name,
         auth_mode = auth_mode,
+        auth_env_openai_api_key_present = auth_env_openai_api_key_present,
+        auth_env_codex_api_key_present = auth_env_codex_api_key_present,
+        auth_env_codex_api_key_enabled = auth_env_codex_api_key_enabled,
+        auth_env_provider_key_name = auth_env_provider_key_name,
+        auth_env_provider_key_present = auth_env_provider_key_present,
+        auth_env_refresh_token_url_override_present = auth_env_refresh_token_url_override_present,
         auth_retry_after_unauthorized = auth_retry_after_unauthorized,
         auth_recovery_mode = auth_recovery_mode,
         auth_recovery_phase = auth_recovery_phase,
