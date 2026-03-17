@@ -60,11 +60,13 @@ pub(crate) fn build_command_spec(
 /// the original script:
 ///
 ///   shell -lc "<script>"
-///   => user_shell -c ". SNAPSHOT (best effort); exec shell -c <script>"
+///   => user_shell -c ". SNAPSHOT (best effort); <script>"
 ///
-/// This wrapper script uses POSIX constructs (`if`, `.`, `exec`) so it can
-/// be run by Bash/Zsh/sh. On non-matching commands, or when command cwd does
-/// not match the snapshot cwd, this is a no-op.
+/// This wrapper script uses POSIX constructs (`if`, `.`) so it can be run by
+/// Bash/Zsh/sh. Running the original script in the same shell process avoids
+/// an additional shell re-exec, which matters for restricted read-only
+/// sandboxes. On non-matching commands, or when command cwd does not match the
+/// snapshot cwd, this is a no-op.
 pub(crate) fn maybe_wrap_shell_lc_with_snapshot(
     command: &[String],
     session_shell: &Shell,
@@ -105,25 +107,23 @@ pub(crate) fn maybe_wrap_shell_lc_with_snapshot(
 
     let snapshot_path = snapshot.path.to_string_lossy();
     let shell_path = session_shell.shell_path.to_string_lossy();
-    let original_shell = shell_single_quote(&command[0]);
-    let original_script = shell_single_quote(&command[2]);
     let snapshot_path = shell_single_quote(snapshot_path.as_ref());
-    let trailing_args = command[3..]
-        .iter()
-        .map(|arg| format!(" '{}'", shell_single_quote(arg)))
-        .collect::<String>();
     let (override_captures, override_exports) = build_override_exports(explicit_env_overrides);
     let rewritten_script = if override_exports.is_empty() {
         format!(
-            "if . '{snapshot_path}' >/dev/null 2>&1; then :; fi\n\nexec '{original_shell}' -c '{original_script}'{trailing_args}"
+            "if . '{snapshot_path}' >/dev/null 2>&1; then :; fi\n\n{}",
+            command[2]
         )
     } else {
         format!(
-            "{override_captures}\n\nif . '{snapshot_path}' >/dev/null 2>&1; then :; fi\n\n{override_exports}\n\nexec '{original_shell}' -c '{original_script}'{trailing_args}"
+            "{override_captures}\n\nif . '{snapshot_path}' >/dev/null 2>&1; then :; fi\n\n{override_exports}\n\n{}",
+            command[2]
         )
     };
 
-    vec![shell_path.to_string(), "-c".to_string(), rewritten_script]
+    let mut rewritten = vec![shell_path.to_string(), "-c".to_string(), rewritten_script];
+    rewritten.extend(command[3..].iter().cloned());
+    rewritten
 }
 
 fn build_override_exports(explicit_env_overrides: &HashMap<String, String>) -> (String, String) {

@@ -33,7 +33,7 @@ fn maybe_wrap_shell_lc_with_snapshot_bootstraps_in_user_shell() {
     let session_shell = shell_with_snapshot(
         ShellType::Zsh,
         "/bin/zsh",
-        snapshot_path,
+        snapshot_path.clone(),
         dir.path().to_path_buf(),
     );
     let command = vec![
@@ -48,7 +48,7 @@ fn maybe_wrap_shell_lc_with_snapshot_bootstraps_in_user_shell() {
     assert_eq!(rewritten[0], "/bin/zsh");
     assert_eq!(rewritten[1], "-c");
     assert!(rewritten[2].contains("if . '"));
-    assert!(rewritten[2].contains("exec '/bin/bash' -c 'echo hello'"));
+    assert!(rewritten[2].ends_with("\n\necho hello"));
 }
 
 #[test]
@@ -59,7 +59,7 @@ fn maybe_wrap_shell_lc_with_snapshot_escapes_single_quotes() {
     let session_shell = shell_with_snapshot(
         ShellType::Zsh,
         "/bin/zsh",
-        snapshot_path,
+        snapshot_path.clone(),
         dir.path().to_path_buf(),
     );
     let command = vec![
@@ -71,7 +71,7 @@ fn maybe_wrap_shell_lc_with_snapshot_escapes_single_quotes() {
     let rewritten =
         maybe_wrap_shell_lc_with_snapshot(&command, &session_shell, dir.path(), &HashMap::new());
 
-    assert!(rewritten[2].contains(r#"exec '/bin/bash' -c 'echo '"'"'hello'"'"''"#));
+    assert!(rewritten[2].ends_with("\n\necho 'hello'"));
 }
 
 #[test]
@@ -82,7 +82,7 @@ fn maybe_wrap_shell_lc_with_snapshot_uses_bash_bootstrap_shell() {
     let session_shell = shell_with_snapshot(
         ShellType::Bash,
         "/bin/bash",
-        snapshot_path,
+        snapshot_path.clone(),
         dir.path().to_path_buf(),
     );
     let command = vec![
@@ -97,7 +97,7 @@ fn maybe_wrap_shell_lc_with_snapshot_uses_bash_bootstrap_shell() {
     assert_eq!(rewritten[0], "/bin/bash");
     assert_eq!(rewritten[1], "-c");
     assert!(rewritten[2].contains("if . '"));
-    assert!(rewritten[2].contains("exec '/bin/zsh' -c 'echo hello'"));
+    assert!(rewritten[2].ends_with("\n\necho hello"));
 }
 
 #[test]
@@ -123,7 +123,7 @@ fn maybe_wrap_shell_lc_with_snapshot_uses_sh_bootstrap_shell() {
     assert_eq!(rewritten[0], "/bin/sh");
     assert_eq!(rewritten[1], "-c");
     assert!(rewritten[2].contains("if . '"));
-    assert!(rewritten[2].contains("exec '/bin/bash' -c 'echo hello'"));
+    assert!(rewritten[2].ends_with("\n\necho hello"));
 }
 
 #[test]
@@ -134,7 +134,7 @@ fn maybe_wrap_shell_lc_with_snapshot_preserves_trailing_args() {
     let session_shell = shell_with_snapshot(
         ShellType::Zsh,
         "/bin/zsh",
-        snapshot_path,
+        snapshot_path.clone(),
         dir.path().to_path_buf(),
     );
     let command = vec![
@@ -148,9 +148,18 @@ fn maybe_wrap_shell_lc_with_snapshot_preserves_trailing_args() {
     let rewritten =
         maybe_wrap_shell_lc_with_snapshot(&command, &session_shell, dir.path(), &HashMap::new());
 
-    assert!(
-        rewritten[2]
-            .contains(r#"exec '/bin/bash' -c 'printf '"'"'%s %s'"'"' "$0" "$1"' 'arg0' 'arg1'"#)
+    assert_eq!(
+        rewritten,
+        vec![
+            "/bin/zsh".to_string(),
+            "-c".to_string(),
+            format!(
+                "if . '{}' >/dev/null 2>&1; then :; fi\n\nprintf '%s %s' \"$0\" \"$1\"",
+                snapshot_path.display()
+            ),
+            "arg0".to_string(),
+            "arg1".to_string(),
+        ]
     );
 }
 
@@ -201,7 +210,7 @@ fn maybe_wrap_shell_lc_with_snapshot_accepts_dot_alias_cwd() {
     assert_eq!(rewritten[0], "/bin/zsh");
     assert_eq!(rewritten[1], "-c");
     assert!(rewritten[2].contains("if . '"));
-    assert!(rewritten[2].contains("exec '/bin/bash' -c 'echo hello'"));
+    assert!(rewritten[2].ends_with("\n\necho hello"));
 }
 
 #[test]
