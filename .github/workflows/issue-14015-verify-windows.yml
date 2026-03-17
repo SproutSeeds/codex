@@ -2,6 +2,9 @@ name: issue-14015-verify-windows
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - sprout/issue-14015-windows-handoff
 
 jobs:
   build-windows-binaries:
