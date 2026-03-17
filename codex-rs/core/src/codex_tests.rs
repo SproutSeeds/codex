@@ -152,14 +152,16 @@ async fn regular_turn_emits_turn_started_without_waiting_for_startup_prewarm() {
         Ok(test_model_client_session())
     });
 
+    sess.set_startup_prewarm(crate::tasks::StartupPrewarmHandle::new(
+        handle,
+        std::time::Instant::now(),
+        crate::client::WEBSOCKET_CONNECT_TIMEOUT,
+    ))
+    .await;
     sess.spawn_task(
         Arc::clone(&tc),
         Vec::new(),
-        crate::tasks::RegularTask::new(Some(crate::tasks::StartupPrewarmHandle::new(
-            handle,
-            std::time::Instant::now(),
-            crate::client::WEBSOCKET_CONNECT_TIMEOUT,
-        ))),
+        crate::tasks::RegularTask::new(),
     )
     .await;
 
@@ -184,14 +186,16 @@ async fn interrupting_regular_turn_waiting_on_startup_prewarm_emits_turn_aborted
         Ok(test_model_client_session())
     });
 
+    sess.set_startup_prewarm(crate::tasks::StartupPrewarmHandle::new(
+        handle,
+        std::time::Instant::now(),
+        crate::client::WEBSOCKET_CONNECT_TIMEOUT,
+    ))
+    .await;
     sess.spawn_task(
         Arc::clone(&tc),
         Vec::new(),
-        crate::tasks::RegularTask::new(Some(crate::tasks::StartupPrewarmHandle::new(
-            handle,
-            std::time::Instant::now(),
-            crate::client::WEBSOCKET_CONNECT_TIMEOUT,
-        ))),
+        crate::tasks::RegularTask::new(),
     )
     .await;
 

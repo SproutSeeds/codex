@@ -5,7 +5,6 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use std::time::Instant;
 
 use crate::AuthManager;
 use crate::CodexAuth;
@@ -314,7 +313,6 @@ use crate::windows_sandbox::WindowsSandboxLevelExt;
 use codex_async_utils::OrCancelExt;
 use codex_otel::SessionTelemetry;
 use codex_otel::TelemetryAuthMode;
-use codex_otel::metrics::names::STARTUP_PREWARM_DURATION_METRIC;
 use codex_otel::metrics::names::THREAD_STARTED_METRIC;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::Personality;
@@ -1933,8 +1931,11 @@ impl Session {
                 ));
             }
         }
-        sess.schedule_startup_prewarm(session_configuration.base_instructions.clone())
-            .await;
+        RegularTask::schedule_startup_prewarm(
+            Arc::clone(&sess),
+            session_configuration.base_instructions.clone(),
+        )
+        .await;
         let session_start_source = match &initial_history {
             InitialHistory::Resumed(_) => codex_hooks::SessionStartSource::Resume,
             InitialHistory::New | InitialHistory::Forked(_) => {
@@ -2413,70 +2414,14 @@ impl Session {
             .await
     }
 
+    pub(crate) async fn set_startup_prewarm(&self, startup_prewarm: StartupPrewarmHandle) {
+        let mut state = self.state.lock().await;
+        state.set_startup_prewarm(startup_prewarm);
+    }
+
     pub(crate) async fn take_startup_prewarm(&self) -> Option<StartupPrewarmHandle> {
         let mut state = self.state.lock().await;
         state.take_startup_prewarm()
-    }
-
-    async fn schedule_startup_prewarm(self: &Arc<Self>, base_instructions: String) {
-        let sess = Arc::clone(self);
-        let session_telemetry = self.services.session_telemetry.clone();
-        let websocket_connect_timeout = self.provider().await.websocket_connect_timeout();
-        let started_at = Instant::now();
-        let startup_prewarm: JoinHandle<CodexResult<ModelClientSession>> =
-            tokio::spawn(async move {
-                let result = sess.schedule_startup_prewarm_inner(base_instructions).await;
-                let status = if result.is_ok() { "ready" } else { "failed" };
-                session_telemetry.record_duration(
-                    STARTUP_PREWARM_DURATION_METRIC,
-                    started_at.elapsed(),
-                    &[("status", status)],
-                );
-                result
-            });
-        let mut state = self.state.lock().await;
-        state.set_startup_prewarm(StartupPrewarmHandle::new(
-            startup_prewarm,
-            started_at,
-            websocket_connect_timeout,
-        ));
-    }
-
-    async fn schedule_startup_prewarm_inner(
-        self: &Arc<Self>,
-        base_instructions: String,
-    ) -> CodexResult<ModelClientSession> {
-        let startup_turn_context = self
-            .new_default_turn_with_sub_id(INITIAL_SUBMIT_ID.to_owned())
-            .await;
-        let startup_cancellation_token = CancellationToken::new();
-        let startup_router = built_tools(
-            self,
-            startup_turn_context.as_ref(),
-            &[],
-            &HashSet::new(),
-            /*skills_outcome*/ None,
-            &startup_cancellation_token,
-        )
-        .await?;
-        let startup_prompt = build_prompt(
-            Vec::new(),
-            startup_router.as_ref(),
-            startup_turn_context.as_ref(),
-            BaseInstructions {
-                text: base_instructions,
-            },
-        );
-        let startup_turn_metadata_header = startup_turn_context
-            .turn_metadata_state
-            .current_header_value();
-        RegularTask::with_startup_prewarm(
-            self.services.model_client.clone(),
-            startup_prompt,
-            startup_turn_context,
-            startup_turn_metadata_header,
-        )
-        .await
     }
 
     pub(crate) async fn get_config(&self) -> std::sync::Arc<Config> {
@@ -4553,8 +4498,7 @@ mod handlers {
         {
             sess.refresh_mcp_servers_if_requested(&current_context)
                 .await;
-            let regular_task = RegularTask::new(sess.take_startup_prewarm().await);
-            sess.spawn_task(Arc::clone(&current_context), items, regular_task)
+            sess.spawn_task(Arc::clone(&current_context), items, RegularTask::new())
                 .await;
         }
     }
@@ -6229,7 +6173,7 @@ fn codex_apps_connector_id(tool: &crate::mcp_connection_manager::ToolInfo) -> Op
     tool.connector_id.as_deref()
 }
 
-fn build_prompt(
+pub(crate) fn build_prompt(
     input: Vec<ResponseItem>,
     router: &ToolRouter,
     turn_context: &TurnContext,

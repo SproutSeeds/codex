@@ -1,5 +1,5 @@
+use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -12,7 +12,11 @@ use tracing::warn;
 use crate::client::ModelClient;
 use crate::client::ModelClientSession;
 use crate::client_common::Prompt;
+use crate::codex::INITIAL_SUBMIT_ID;
+use crate::codex::Session;
 use crate::codex::TurnContext;
+use crate::codex::build_prompt;
+use crate::codex::built_tools;
 use crate::codex::run_turn;
 use crate::error::Result as CodexResult;
 use crate::protocol::EventMsg;
@@ -21,6 +25,7 @@ use crate::state::TaskKind;
 use codex_otel::SessionTelemetry;
 use codex_otel::metrics::names::STARTUP_PREWARM_AGE_AT_FIRST_TURN_METRIC;
 use codex_otel::metrics::names::STARTUP_PREWARM_DURATION_METRIC;
+use codex_protocol::models::BaseInstructions;
 use codex_protocol::user_input::UserInput;
 use tracing::Instrument;
 use tracing::trace_span;
@@ -161,15 +166,73 @@ impl StartupPrewarmHandle {
 }
 
 #[derive(Default)]
-pub(crate) struct RegularTask {
-    startup_prewarm: Mutex<Option<StartupPrewarmHandle>>,
-}
+pub(crate) struct RegularTask;
 
 impl RegularTask {
-    pub(crate) fn new(startup_prewarm: Option<StartupPrewarmHandle>) -> Self {
-        Self {
-            startup_prewarm: Mutex::new(startup_prewarm),
-        }
+    pub(crate) fn new() -> Self {
+        Self
+    }
+
+    pub(crate) async fn schedule_startup_prewarm(session: Arc<Session>, base_instructions: String) {
+        let session_telemetry = session.services.session_telemetry.clone();
+        let websocket_connect_timeout = session.provider().await.websocket_connect_timeout();
+        let started_at = Instant::now();
+        let prewarm_session = Arc::clone(&session);
+        let startup_prewarm = tokio::spawn(async move {
+            let result =
+                Self::schedule_startup_prewarm_inner(prewarm_session, base_instructions).await;
+            let status = if result.is_ok() { "ready" } else { "failed" };
+            session_telemetry.record_duration(
+                STARTUP_PREWARM_DURATION_METRIC,
+                started_at.elapsed(),
+                &[("status", status)],
+            );
+            result
+        });
+        session
+            .set_startup_prewarm(StartupPrewarmHandle::new(
+                startup_prewarm,
+                started_at,
+                websocket_connect_timeout,
+            ))
+            .await;
+    }
+
+    async fn schedule_startup_prewarm_inner(
+        session: Arc<Session>,
+        base_instructions: String,
+    ) -> CodexResult<ModelClientSession> {
+        let startup_turn_context = session
+            .new_default_turn_with_sub_id(INITIAL_SUBMIT_ID.to_owned())
+            .await;
+        let startup_cancellation_token = CancellationToken::new();
+        let startup_router = built_tools(
+            session.as_ref(),
+            startup_turn_context.as_ref(),
+            &[],
+            &HashSet::new(),
+            /*skills_outcome*/ None,
+            &startup_cancellation_token,
+        )
+        .await?;
+        let startup_prompt = build_prompt(
+            Vec::new(),
+            startup_router.as_ref(),
+            startup_turn_context.as_ref(),
+            BaseInstructions {
+                text: base_instructions,
+            },
+        );
+        let startup_turn_metadata_header = startup_turn_context
+            .turn_metadata_state
+            .current_header_value();
+        Self::with_startup_prewarm(
+            session.services.model_client.clone(),
+            startup_prompt,
+            startup_turn_context,
+            startup_turn_metadata_header,
+        )
+        .await
     }
 
     pub(crate) async fn with_startup_prewarm(
@@ -196,19 +259,14 @@ impl RegularTask {
 
     async fn take_prewarmed_session(
         &self,
-        session_telemetry: &SessionTelemetry,
+        session: &Session,
         cancellation_token: &CancellationToken,
     ) -> Result<Option<ModelClientSession>, StartupPrewarmCancelled> {
-        let startup_prewarm = self
-            .startup_prewarm
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        let Some(startup_prewarm) = startup_prewarm else {
+        let Some(startup_prewarm) = session.take_startup_prewarm().await else {
             return Ok(None);
         };
         startup_prewarm
-            .resolve(session_telemetry, cancellation_token)
+            .resolve(&session.services.session_telemetry, cancellation_token)
             .await
     }
 }
@@ -242,7 +300,7 @@ impl SessionTask for RegularTask {
         sess.send_event(ctx.as_ref(), event).await;
         sess.set_server_reasoning_included(/*included*/ false).await;
         let prewarmed_client_session = match self
-            .take_prewarmed_session(&sess.services.session_telemetry, &cancellation_token)
+            .take_prewarmed_session(&sess, &cancellation_token)
             .await
         {
             Ok(prewarmed_client_session) => prewarmed_client_session,
