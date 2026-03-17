@@ -85,7 +85,7 @@ fn auth_env_metadata() -> AuthEnvTelemetryMetadata {
         openai_api_key_env_present: true,
         codex_api_key_env_present: false,
         codex_api_key_env_enabled: true,
-        provider_env_key_name: Some("ANTHROPIC_API_KEY".to_string()),
+        provider_env_key_name: Some("configured".to_string()),
         provider_env_key_present: Some(true),
         refresh_token_url_override_present: true,
     }
@@ -546,7 +546,7 @@ fn otel_export_routing_policy_routes_api_request_auth_observability() {
         conversation_log_attrs
             .get("auth.env_provider_key_name")
             .map(String::as_str),
-        Some("ANTHROPIC_API_KEY")
+        Some("configured")
     );
     let request_log = find_log_by_event_name(&logs, "codex.api_request");
     let request_log_attrs = log_attributes(&request_log.record);
@@ -740,7 +740,7 @@ fn otel_export_routing_policy_routes_websocket_connect_auth_observability() {
         connect_log_attrs
             .get("auth.env_provider_key_name")
             .map(String::as_str),
-        Some("ANTHROPIC_API_KEY")
+        Some("configured")
     );
 
     let spans = span_exporter.get_finished_spans().expect("span export");

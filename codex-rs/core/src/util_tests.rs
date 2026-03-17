@@ -96,7 +96,7 @@ fn emit_feedback_request_tags_records_sentry_feedback_fields() {
         openai_api_key_env_present: true,
         codex_api_key_env_present: false,
         codex_api_key_env_enabled: true,
-        provider_env_key_name: Some("ANTHROPIC_API_KEY".to_string()),
+        provider_env_key_name: Some("configured".to_string()),
         provider_env_key_present: Some(true),
         refresh_token_url_override_present: true,
     };
@@ -137,21 +137,21 @@ fn emit_feedback_request_tags_records_sentry_feedback_fields() {
     assert_eq!(
         tags.get("auth_env_openai_api_key_present")
             .map(String::as_str),
-        Some("\"true\"")
+        Some("true")
     );
     assert_eq!(
         tags.get("auth_env_codex_api_key_present")
             .map(String::as_str),
-        Some("\"false\"")
+        Some("false")
     );
     assert_eq!(
         tags.get("auth_env_codex_api_key_enabled")
             .map(String::as_str),
-        Some("\"true\"")
+        Some("true")
     );
     assert_eq!(
         tags.get("auth_env_provider_key_name").map(String::as_str),
-        Some("\"ANTHROPIC_API_KEY\"")
+        Some("\"configured\"")
     );
     assert_eq!(
         tags.get("auth_env_provider_key_present")
@@ -161,7 +161,7 @@ fn emit_feedback_request_tags_records_sentry_feedback_fields() {
     assert_eq!(
         tags.get("auth_env_refresh_token_url_override_present")
             .map(String::as_str),
-        Some("\"true\"")
+        Some("true")
     );
     assert_eq!(
         tags.get("auth_request_id").map(String::as_str),
@@ -310,7 +310,7 @@ fn emit_feedback_request_tags_preserves_latest_auth_fields_after_unauthorized() 
 }
 
 #[test]
-fn emit_feedback_request_tags_clears_stale_latest_auth_fields() {
+fn emit_feedback_request_tags_preserves_auth_env_fields_for_legacy_emitters() {
     let tags = Arc::new(Mutex::new(BTreeMap::new()));
     let _guard = tracing_subscriber::registry()
         .with(TagCollectorLayer { tags: tags.clone() })
@@ -320,7 +320,7 @@ fn emit_feedback_request_tags_clears_stale_latest_auth_fields() {
         openai_api_key_env_present: true,
         codex_api_key_env_present: true,
         codex_api_key_env_enabled: true,
-        provider_env_key_name: Some("CUSTOM_PROVIDER_KEY".to_string()),
+        provider_env_key_name: Some("configured".to_string()),
         provider_env_key_present: Some(true),
         refresh_token_url_override_present: true,
     };
@@ -380,31 +380,31 @@ fn emit_feedback_request_tags_clears_stale_latest_auth_fields() {
     assert_eq!(
         tags.get("auth_env_openai_api_key_present")
             .map(String::as_str),
-        Some("\"\"")
+        Some("true")
     );
     assert_eq!(
         tags.get("auth_env_codex_api_key_present")
             .map(String::as_str),
-        Some("\"\"")
+        Some("true")
     );
     assert_eq!(
         tags.get("auth_env_codex_api_key_enabled")
             .map(String::as_str),
-        Some("\"\"")
+        Some("true")
     );
     assert_eq!(
         tags.get("auth_env_provider_key_name").map(String::as_str),
-        Some("\"\"")
+        Some("\"configured\"")
     );
     assert_eq!(
         tags.get("auth_env_provider_key_present")
             .map(String::as_str),
-        Some("\"\"")
+        Some("\"true\"")
     );
     assert_eq!(
         tags.get("auth_env_refresh_token_url_override_present")
             .map(String::as_str),
-        Some("\"\"")
+        Some("true")
     );
     assert_eq!(
         tags.get("auth_recovery_followup_success")

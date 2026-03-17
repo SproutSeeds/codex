@@ -79,40 +79,8 @@ impl<'a> Auth401FeedbackSnapshot<'a> {
 }
 
 pub(crate) fn emit_feedback_request_tags(tags: &FeedbackRequestTags<'_>) {
-    emit_feedback_request_tags_inner(tags, None);
-}
-
-pub(crate) fn emit_feedback_request_tags_with_auth_env(
-    tags: &FeedbackRequestTags<'_>,
-    auth_env: &AuthEnvTelemetry,
-) {
-    emit_feedback_request_tags_inner(tags, Some(auth_env));
-}
-
-fn emit_feedback_request_tags_inner(
-    tags: &FeedbackRequestTags<'_>,
-    auth_env: Option<&AuthEnvTelemetry>,
-) {
     let auth_header_name = tags.auth_header_name.unwrap_or("");
     let auth_mode = tags.auth_mode.unwrap_or("");
-    let auth_env_openai_api_key_present = auth_env.map_or_else(String::new, |value| {
-        value.openai_api_key_env_present.to_string()
-    });
-    let auth_env_codex_api_key_present = auth_env.map_or_else(String::new, |value| {
-        value.codex_api_key_env_present.to_string()
-    });
-    let auth_env_codex_api_key_enabled = auth_env.map_or_else(String::new, |value| {
-        value.codex_api_key_env_enabled.to_string()
-    });
-    let auth_env_provider_key_name = auth_env
-        .and_then(|value| value.provider_env_key_name.as_deref())
-        .unwrap_or("");
-    let auth_env_provider_key_present = auth_env
-        .and_then(|value| value.provider_env_key_present)
-        .map_or_else(String::new, |value| value.to_string());
-    let auth_env_refresh_token_url_override_present = auth_env.map_or_else(String::new, |value| {
-        value.refresh_token_url_override_present.to_string()
-    });
     let auth_retry_after_unauthorized = tags
         .auth_retry_after_unauthorized
         .map_or_else(String::new, |value| value.to_string());
@@ -136,12 +104,56 @@ fn emit_feedback_request_tags_inner(
         auth_header_attached = tags.auth_header_attached,
         auth_header_name = auth_header_name,
         auth_mode = auth_mode,
-        auth_env_openai_api_key_present = auth_env_openai_api_key_present,
-        auth_env_codex_api_key_present = auth_env_codex_api_key_present,
-        auth_env_codex_api_key_enabled = auth_env_codex_api_key_enabled,
-        auth_env_provider_key_name = auth_env_provider_key_name,
-        auth_env_provider_key_present = auth_env_provider_key_present,
-        auth_env_refresh_token_url_override_present = auth_env_refresh_token_url_override_present,
+        auth_retry_after_unauthorized = auth_retry_after_unauthorized,
+        auth_recovery_mode = auth_recovery_mode,
+        auth_recovery_phase = auth_recovery_phase,
+        auth_connection_reused = auth_connection_reused,
+        auth_request_id = auth_request_id,
+        auth_cf_ray = auth_cf_ray,
+        auth_error = auth_error,
+        auth_error_code = auth_error_code,
+        auth_recovery_followup_success = auth_recovery_followup_success,
+        auth_recovery_followup_status = auth_recovery_followup_status
+    );
+}
+
+pub(crate) fn emit_feedback_request_tags_with_auth_env(
+    tags: &FeedbackRequestTags<'_>,
+    auth_env: &AuthEnvTelemetry,
+) {
+    let auth_header_name = tags.auth_header_name.unwrap_or("");
+    let auth_mode = tags.auth_mode.unwrap_or("");
+    let auth_retry_after_unauthorized = tags
+        .auth_retry_after_unauthorized
+        .map_or_else(String::new, |value| value.to_string());
+    let auth_recovery_mode = tags.auth_recovery_mode.unwrap_or("");
+    let auth_recovery_phase = tags.auth_recovery_phase.unwrap_or("");
+    let auth_connection_reused = tags
+        .auth_connection_reused
+        .map_or_else(String::new, |value| value.to_string());
+    let auth_request_id = tags.auth_request_id.unwrap_or("");
+    let auth_cf_ray = tags.auth_cf_ray.unwrap_or("");
+    let auth_error = tags.auth_error.unwrap_or("");
+    let auth_error_code = tags.auth_error_code.unwrap_or("");
+    let auth_recovery_followup_success = tags
+        .auth_recovery_followup_success
+        .map_or_else(String::new, |value| value.to_string());
+    let auth_recovery_followup_status = tags
+        .auth_recovery_followup_status
+        .map_or_else(String::new, |value| value.to_string());
+    feedback_tags!(
+        endpoint = tags.endpoint,
+        auth_header_attached = tags.auth_header_attached,
+        auth_header_name = auth_header_name,
+        auth_mode = auth_mode,
+        auth_env_openai_api_key_present = auth_env.openai_api_key_env_present,
+        auth_env_codex_api_key_present = auth_env.codex_api_key_env_present,
+        auth_env_codex_api_key_enabled = auth_env.codex_api_key_env_enabled,
+        auth_env_provider_key_name = auth_env.provider_env_key_name.as_deref().unwrap_or(""),
+        auth_env_provider_key_present = auth_env
+            .provider_env_key_present
+            .map_or_else(String::new, |value| value.to_string()),
+        auth_env_refresh_token_url_override_present = auth_env.refresh_token_url_override_present,
         auth_retry_after_unauthorized = auth_retry_after_unauthorized,
         auth_recovery_mode = auth_recovery_mode,
         auth_recovery_phase = auth_recovery_phase,
