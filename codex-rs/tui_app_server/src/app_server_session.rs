@@ -1082,6 +1082,7 @@ fn app_server_thread_item_to_core(item: codex_app_server_protocol::ThreadItem) -
         | codex_app_server_protocol::ThreadItem::McpToolCall { .. }
         | codex_app_server_protocol::ThreadItem::DynamicToolCall { .. }
         | codex_app_server_protocol::ThreadItem::CollabAgentToolCall { .. }
+        | codex_app_server_protocol::ThreadItem::HookPrompt { .. }
         | codex_app_server_protocol::ThreadItem::ImageView { .. }
         | codex_app_server_protocol::ThreadItem::EnteredReviewMode { .. }
         | codex_app_server_protocol::ThreadItem::ExitedReviewMode { .. } => None,
