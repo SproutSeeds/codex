@@ -13640,13 +13640,6 @@
         ],
         "type": "object"
       },
-      "ToolExecutionMode": {
-        "enum": [
-          "auto",
-          "manual"
-        ],
-        "type": "string"
-      },
       "ToolsV2": {
         "properties": {
           "enabled": {
@@ -13658,17 +13651,6 @@
               "array",
               "null"
             ]
-          },
-          "execution_mode": {
-            "anyOf": [
-              {
-                "$ref": "#/definitions/v2/ToolExecutionMode"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Execution policy for approval-capable tools."
           },
           "view_image": {
             "description": "Legacy enablement for the `view_image` capability.",

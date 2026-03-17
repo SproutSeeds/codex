@@ -874,7 +874,6 @@ impl TurnContext {
         })
         .with_enabled_tool_capabilities(config.enabled_tool_capabilities.clone())
         .with_legacy_view_image_override(config.legacy_view_image_override)
-        .with_execution_mode(config.tool_execution_mode)
         .with_unified_exec_shell_mode(self.tools_config.unified_exec_shell_mode.clone())
         .with_web_search_config(self.tools_config.web_search_config.clone())
         .with_allow_login_shell(self.tools_config.allow_login_shell)
@@ -1311,7 +1310,6 @@ impl Session {
         })
         .with_enabled_tool_capabilities(per_turn_config.enabled_tool_capabilities.clone())
         .with_legacy_view_image_override(per_turn_config.legacy_view_image_override)
-        .with_execution_mode(per_turn_config.tool_execution_mode)
         .with_unified_exec_shell_mode_for_session(
             user_shell,
             shell_zsh_path,
@@ -5295,7 +5293,6 @@ async fn spawn_review_thread(
     })
     .with_enabled_tool_capabilities(config.enabled_tool_capabilities.clone())
     .with_legacy_view_image_override(config.legacy_view_image_override)
-    .with_execution_mode(config.tool_execution_mode)
     .with_unified_exec_shell_mode_for_session(
         sess.services.user_shell.as_ref(),
         sess.services.shell_zsh_path.as_ref(),
