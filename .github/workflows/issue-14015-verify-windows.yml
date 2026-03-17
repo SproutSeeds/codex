@@ -26,7 +26,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --target x86_64-pc-windows-msvc --release \
+          cargo build --target x86_64-pc-windows-msvc \
             --bin codex \
             --bin codex-responses-api-proxy \
             --bin codex-windows-sandbox-setup \
@@ -35,15 +35,15 @@ jobs:
       - name: Stage Windows binaries
         shell: bash
         run: |
-          output_dir="target/x86_64-pc-windows-msvc/release/staged-issue-14015"
+          output_dir="target/x86_64-pc-windows-msvc/debug/staged-issue-14015"
           mkdir -p "$output_dir"
-          cp target/x86_64-pc-windows-msvc/release/codex.exe "$output_dir/codex.exe"
-          cp target/x86_64-pc-windows-msvc/release/codex-responses-api-proxy.exe "$output_dir/codex-responses-api-proxy.exe"
-          cp target/x86_64-pc-windows-msvc/release/codex-windows-sandbox-setup.exe "$output_dir/codex-windows-sandbox-setup.exe"
-          cp target/x86_64-pc-windows-msvc/release/codex-command-runner.exe "$output_dir/codex-command-runner.exe"
+          cp target/x86_64-pc-windows-msvc/debug/codex.exe "$output_dir/codex.exe"
+          cp target/x86_64-pc-windows-msvc/debug/codex-responses-api-proxy.exe "$output_dir/codex-responses-api-proxy.exe"
+          cp target/x86_64-pc-windows-msvc/debug/codex-windows-sandbox-setup.exe "$output_dir/codex-windows-sandbox-setup.exe"
+          cp target/x86_64-pc-windows-msvc/debug/codex-command-runner.exe "$output_dir/codex-command-runner.exe"
 
       - name: Upload Windows binaries
         uses: actions/upload-artifact@v7
         with:
-          name: issue-14015-windows-binaries-x86_64-pc-windows-msvc
-          path: codex-rs/target/x86_64-pc-windows-msvc/release/staged-issue-14015/*
+          name: issue-14015-windows-binaries-x86_64-pc-windows-msvc-debug
+          path: codex-rs/target/x86_64-pc-windows-msvc/debug/staged-issue-14015/*
