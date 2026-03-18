@@ -3711,6 +3711,42 @@ async fn build_initial_context_omits_default_image_save_location_without_image_h
 }
 
 #[tokio::test]
+async fn build_initial_context_ignores_large_session_storage_artifacts() {
+    let (session, turn_context) = make_session_and_context().await;
+    let baseline = session.build_initial_context(&turn_context).await;
+
+    let codex_home = turn_context.config.codex_home.clone();
+    let sessions_dir = codex_home.join("sessions/2026/03/18");
+    std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+
+    let rollout_payload = "{\"type\":\"placeholder\"}\n".repeat(64);
+    for idx in 0..200 {
+        let path = sessions_dir.join(format!("rollout-2026-03-18T00-00-{idx:02}-test.jsonl"));
+        std::fs::write(path, &rollout_payload).expect("write rollout placeholder");
+    }
+
+    let mut session_index = String::new();
+    for idx in 0..2_000 {
+        let entry = serde_json::json!({
+            "id": ThreadId::new(),
+            "thread_name": format!("thread-{idx}"),
+            "updated_at": "2026-03-18T00:00:00Z",
+        });
+        session_index.push_str(
+            serde_json::to_string(&entry)
+                .expect("serialize session index entry")
+                .as_str(),
+        );
+        session_index.push('\n');
+    }
+    std::fs::write(codex_home.join("session_index.jsonl"), session_index)
+        .expect("write session index");
+
+    let with_storage_artifacts = session.build_initial_context(&turn_context).await;
+    assert_eq!(baseline, with_storage_artifacts);
+}
+
+#[tokio::test]
 async fn handle_output_item_done_records_image_save_history_message() {
     let (session, turn_context) = make_session_and_context().await;
     let session = Arc::new(session);

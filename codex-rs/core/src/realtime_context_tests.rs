@@ -133,3 +133,82 @@ fn recent_work_section_groups_threads_by_cwd() {
     assert!(section.contains(&format!("### Directory: {}", outside.display())));
     assert!(section.contains(&format!("- {}: Inspect flaky test", outside.display())));
 }
+
+#[test]
+fn recent_work_section_caps_groups_and_asks() {
+    let root = TempDir::new().expect("tempdir");
+    let current_repo = root.path().join("repo-current");
+    std::fs::create_dir(&current_repo).expect("create current repo dir");
+    Command::new("git")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["init"])
+        .current_dir(&current_repo)
+        .output()
+        .expect("git init current repo");
+    let current_workspace = current_repo.join("workspace-current");
+    std::fs::create_dir_all(&current_workspace).expect("create current workspace");
+
+    let mut recent_threads = Vec::new();
+    for idx in 0..12 {
+        recent_threads.push(thread_metadata(
+            current_workspace.to_string_lossy().as_ref(),
+            &format!("current-title-{idx}"),
+            &format!("current ask {idx}"),
+        ));
+    }
+
+    let mut omitted_repo = None;
+    let mut sample_other_workspace = None;
+    for repo_idx in 0..9 {
+        let repo = root.path().join(format!("repo-{repo_idx:02}"));
+        std::fs::create_dir(&repo).expect("create repo dir");
+        Command::new("git")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args(["init"])
+            .current_dir(&repo)
+            .output()
+            .expect("git init repo");
+        let workspace = repo.join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create repo workspace");
+        if repo_idx == 0 {
+            sample_other_workspace = Some(workspace.clone());
+        }
+        if repo_idx == 8 {
+            omitted_repo = Some(std::fs::canonicalize(&repo).expect("canonicalize omitted repo"));
+        }
+        for ask_idx in 0..7 {
+            recent_threads.push(thread_metadata(
+                workspace.to_string_lossy().as_ref(),
+                &format!("repo-{repo_idx}-title-{ask_idx}"),
+                &format!("repo-{repo_idx} ask {ask_idx}"),
+            ));
+        }
+    }
+
+    let section = build_recent_work_section(current_workspace.as_path(), &recent_threads)
+        .expect("recent work section");
+    let current_repo = std::fs::canonicalize(&current_repo).expect("canonicalize current repo");
+    let omitted_repo = omitted_repo.expect("omitted repo");
+    let sample_other_workspace = sample_other_workspace.expect("sample other workspace");
+
+    assert_eq!(section.matches("### ").count(), 8);
+    assert!(section.contains(&format!("### Git repo: {}", current_repo.display())));
+    assert!(section.contains("Recent sessions: 12"));
+    assert_eq!(
+        section
+            .lines()
+            .filter(|line| line.starts_with(&format!("- {}:", current_workspace.display())))
+            .count(),
+        8
+    );
+    assert_eq!(
+        section
+            .lines()
+            .filter(|line| line.starts_with(&format!("- {}:", sample_other_workspace.display())))
+            .count(),
+        5
+    );
+    assert!(!section.contains(&format!("### Git repo: {}", omitted_repo.display())));
+}
