@@ -51,6 +51,28 @@ fn write_session_file(root: &Path, ts: &str, uuid: Uuid) -> std::io::Result<Path
     Ok(path)
 }
 
+fn write_session_meta_only_file(root: &Path, ts: &str, uuid: Uuid) -> std::io::Result<PathBuf> {
+    let day_dir = root.join("sessions/2025/01/03");
+    fs::create_dir_all(&day_dir)?;
+    let path = day_dir.join(format!("rollout-{ts}-{uuid}.jsonl"));
+    let mut file = File::create(&path)?;
+    let meta = serde_json::json!({
+        "timestamp": ts,
+        "type": "session_meta",
+        "payload": {
+            "id": uuid,
+            "timestamp": ts,
+            "cwd": ".",
+            "originator": "test_originator",
+            "cli_version": "test_version",
+            "source": "cli",
+            "model_provider": "test-provider",
+        },
+    });
+    writeln!(file, "{meta}")?;
+    Ok(path)
+}
+
 #[tokio::test]
 async fn recorder_materializes_only_after_explicit_persist() -> std::io::Result<()> {
     let home = TempDir::new().expect("temp dir");
@@ -220,6 +242,65 @@ async fn metadata_irrelevant_events_touch_state_db_updated_at() -> std::io::Resu
     );
 
     recorder.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn list_threads_fallback_keeps_meta_only_sessions_visible() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let mut config = ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .build()
+        .await?;
+    config
+        .features
+        .enable(Feature::Sqlite)
+        .expect("test config should allow sqlite");
+
+    let _state_db = StateRuntime::init(home.path().to_path_buf(), config.model_provider_id.clone())
+        .await
+        .expect("state db should initialize");
+
+    let oldest = Uuid::from_u128(9101);
+    let middle = Uuid::from_u128(9102);
+    let newest = Uuid::from_u128(9103);
+    write_session_meta_only_file(home.path(), "2025-01-03T11-00-00", oldest)?;
+    write_session_file(home.path(), "2025-01-03T12-00-00", middle)?;
+    write_session_meta_only_file(home.path(), "2025-01-03T13-00-00", newest)?;
+
+    let default_provider = config.model_provider_id.clone();
+    let page = RolloutRecorder::list_threads(
+        &config,
+        10,
+        None,
+        ThreadSortKey::CreatedAt,
+        &[],
+        None,
+        default_provider.as_str(),
+        None,
+    )
+    .await?;
+
+    let ids: Vec<_> = page
+        .items
+        .iter()
+        .map(|item| {
+            item.thread_id
+                .expect("listed thread should include thread id")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        ids,
+        vec![newest.to_string(), middle.to_string(), oldest.to_string(),]
+    );
+    assert_eq!(page.items[0].first_user_message, None);
+    assert_eq!(
+        page.items[1].first_user_message.as_deref(),
+        Some("Hello from user")
+    );
+    assert_eq!(page.items[2].first_user_message, None);
+
     Ok(())
 }
 

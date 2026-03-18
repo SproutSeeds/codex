@@ -711,8 +711,10 @@ async fn build_thread_item(
     {
         return None;
     }
-    // Apply filters: must have session meta and at least one user message event
-    if summary.saw_session_meta && summary.saw_user_event {
+    // Apply filters: session metadata is required, while the first user message
+    // remains optional so freshly created or resumed threads do not disappear
+    // from restart-driven listings before their first persisted user turn.
+    if summary.saw_session_meta {
         let HeadTailSummary {
             thread_id,
             first_user_message,
