@@ -215,6 +215,27 @@ async fn indicates_truncated_results() {
 }
 
 #[tokio::test]
+async fn lists_gitignored_entries() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let dir_path = temp.path();
+    tokio::fs::create_dir(dir_path.join(".git")).await?;
+    tokio::fs::write(dir_path.join(".gitignore"), "secret.txt\n").await?;
+    tokio::fs::write(dir_path.join("secret.txt"), b"super secret").await?;
+
+    let entries = list_dir_slice(dir_path, 1, 10, 1).await?;
+
+    assert_eq!(
+        entries,
+        vec![
+            ".git/".to_string(),
+            ".gitignore".to_string(),
+            "secret.txt".to_string(),
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn truncation_respects_sorted_order() -> anyhow::Result<()> {
     let temp = tempdir()?;
     let dir_path = temp.path();

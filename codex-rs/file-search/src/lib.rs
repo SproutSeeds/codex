@@ -1133,4 +1133,54 @@ mod tests {
                 .any(|m| m.path.as_path() == Path::new(".vscode/settings.json"))
         );
     }
+
+    #[test]
+    fn gitignored_secret_files_are_omitted_from_search_results() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::write(repo.join(".gitignore"), "secret.txt\n").unwrap();
+        fs::write(repo.join("secret.txt"), "top secret\n").unwrap();
+        fs::write(repo.join("visible.txt"), "visible\n").unwrap();
+
+        let hidden_results = run(
+            "secret",
+            vec![repo.clone()],
+            FileSearchOptions {
+                limit: NonZero::new(20).unwrap(),
+                exclude: Vec::new(),
+                threads: NonZero::new(2).unwrap(),
+                compute_indices: false,
+                respect_gitignore: true,
+            },
+            None,
+        )
+        .expect("run ok");
+        assert!(
+            !hidden_results
+                .matches
+                .iter()
+                .any(|m| m.path.as_path() == Path::new("secret.txt"))
+        );
+
+        let visible_results = run(
+            "visible",
+            vec![repo],
+            FileSearchOptions {
+                limit: NonZero::new(20).unwrap(),
+                exclude: Vec::new(),
+                threads: NonZero::new(2).unwrap(),
+                compute_indices: false,
+                respect_gitignore: true,
+            },
+            None,
+        )
+        .expect("run ok");
+        assert!(
+            visible_results
+                .matches
+                .iter()
+                .any(|m| m.path.as_path() == Path::new("visible.txt"))
+        );
+    }
 }

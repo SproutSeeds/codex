@@ -3,6 +3,7 @@ use super::slice::read;
 use super::*;
 use pretty_assertions::assert_eq;
 use tempfile::NamedTempFile;
+use tempfile::tempdir;
 
 #[tokio::test]
 async fn reads_requested_range() -> anyhow::Result<()> {
@@ -90,6 +91,20 @@ async fn truncates_lines_longer_than_max_length() -> anyhow::Result<()> {
     let lines = read(temp.path(), 1, 1).await?;
     let expected = "x".repeat(MAX_LINE_LENGTH);
     assert_eq!(lines, vec![format!("L1: {expected}")]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn reads_gitignored_files_by_absolute_path() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let repo = temp.path();
+    tokio::fs::create_dir(repo.join(".git")).await?;
+    tokio::fs::write(repo.join(".gitignore"), "secret.txt\n").await?;
+    tokio::fs::write(repo.join("secret.txt"), "super secret\n").await?;
+
+    let lines = read(&repo.join("secret.txt"), 1, 10).await?;
+
+    assert_eq!(lines, vec!["L1: super secret".to_string()]);
     Ok(())
 }
 
