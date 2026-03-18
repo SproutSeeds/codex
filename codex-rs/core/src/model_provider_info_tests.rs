@@ -121,3 +121,25 @@ supports_websockets = true
     let provider: ModelProviderInfo = toml::from_str(provider_toml).unwrap();
     assert_eq!(provider.websocket_connect_timeout_ms, Some(15_000));
 }
+
+#[test]
+fn chatgpt_auth_uses_chatgpt_backend_by_default() {
+    let provider = ModelProviderInfo::create_openai_provider(None);
+
+    let api_provider = provider.to_api_provider(Some(AuthMode::Chatgpt)).unwrap();
+
+    assert_eq!(
+        api_provider.base_url,
+        "https://chatgpt.com/backend-api/codex"
+    );
+}
+
+#[test]
+fn explicit_openai_base_url_overrides_chatgpt_backend_default() {
+    let provider =
+        ModelProviderInfo::create_openai_provider(Some("https://proxy.example/v1".to_string()));
+
+    let api_provider = provider.to_api_provider(Some(AuthMode::Chatgpt)).unwrap();
+
+    assert_eq!(api_provider.base_url, "https://proxy.example/v1");
+}
