@@ -27,6 +27,8 @@ use codex_rmcp_client::perform_oauth_login;
 use codex_utils_cli::CliConfigOverrides;
 use codex_utils_cli::format_env_display::format_env_display;
 
+const DYNAMIC_CLIENT_REGISTRATION_UNSUPPORTED: &str = "Dynamic client registration not supported";
+
 /// Subcommands:
 /// - `list`   — list configured servers (with `--json`)
 /// - `get`    — show a single server (with `--json`)
@@ -235,6 +237,17 @@ async fn perform_oauth_login_retry_without_scopes(
     }
 }
 
+fn rewrite_oauth_login_error(server_name: &str, err: anyhow::Error) -> anyhow::Error {
+    let err_text = format!("{err:#}");
+    if err_text.contains(DYNAMIC_CLIENT_REGISTRATION_UNSUPPORTED) {
+        anyhow!(
+            "OAuth login for MCP server `{server_name}` failed because the provider does not support dynamic client registration. Codex currently cannot supply a pre-registered OAuth client_id/client_secret for MCP login.\n\nIf this provider requires app credentials, configure it outside the current `codex mcp login` flow and use a bearer token or wait for pre-registered OAuth client support.\n\nOriginal error: {err_text}"
+        )
+    } else {
+        err
+    }
+}
+
 async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Result<()> {
     // Validate any provided overrides even though they are not currently applied.
     let overrides = config_overrides
@@ -428,7 +441,8 @@ async fn run_login(config_overrides: &CliConfigOverrides, login_args: LoginArgs)
         config.mcp_oauth_callback_port,
         config.mcp_oauth_callback_url.as_deref(),
     )
-    .await?;
+    .await
+    .map_err(|err| rewrite_oauth_login_error(&name, err))?;
     println!("Successfully logged in to MCP server '{name}'.");
     Ok(())
 }
@@ -908,5 +922,34 @@ fn format_mcp_status(config: &McpServerConfig) -> String {
         format!("disabled: {reason}")
     } else {
         "disabled".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::anyhow;
+
+    use super::rewrite_oauth_login_error;
+
+    #[test]
+    fn rewrite_oauth_login_error_adds_pre_registered_client_guidance() {
+        let err = anyhow!(
+            "Registration failed: Dynamic registration failed: Registration failed: Dynamic client registration not supported"
+        );
+
+        let rendered = format!("{}", rewrite_oauth_login_error("slack", err));
+
+        assert!(rendered.contains("pre-registered OAuth client_id/client_secret"));
+        assert!(rendered.contains("Dynamic client registration not supported"));
+        assert!(rendered.contains("codex mcp login"));
+    }
+
+    #[test]
+    fn rewrite_oauth_login_error_leaves_other_errors_unchanged() {
+        let err = anyhow!("some other oauth failure");
+
+        let rendered = format!("{}", rewrite_oauth_login_error("docs", err));
+
+        assert_eq!(rendered, "some other oauth failure");
     }
 }
