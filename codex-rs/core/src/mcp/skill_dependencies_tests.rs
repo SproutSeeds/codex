@@ -46,6 +46,8 @@ fn collect_missing_respects_canonical_installed_key() {
             disabled_tools: None,
             scopes: None,
             oauth_resource: None,
+            oauth_client_id: None,
+            oauth_client_secret_env_var: None,
             tools: HashMap::new(),
         },
     )]);
@@ -96,6 +98,8 @@ fn collect_missing_dedupes_by_canonical_key_but_preserves_original_name() {
             disabled_tools: None,
             scopes: None,
             oauth_resource: None,
+            oauth_client_id: None,
+            oauth_client_secret_env_var: None,
             tools: HashMap::new(),
         },
     )]);

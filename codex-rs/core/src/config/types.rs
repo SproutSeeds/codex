@@ -109,6 +109,14 @@ pub struct McpServerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth_resource: Option<String>,
 
+    /// Optional pre-registered OAuth client identifier to use instead of dynamic client registration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_client_id: Option<String>,
+
+    /// Optional environment variable containing the OAuth client secret for `oauth_client_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_client_secret_env_var: Option<String>,
+
     /// Per-tool approval settings keyed by tool name.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub tools: HashMap<String, McpServerToolConfig>,
@@ -158,6 +166,10 @@ pub(crate) struct RawMcpServerConfig {
     pub scopes: Option<Vec<String>>,
     #[serde(default)]
     pub oauth_resource: Option<String>,
+    #[serde(default)]
+    pub oauth_client_id: Option<String>,
+    #[serde(default)]
+    pub oauth_client_secret_env_var: Option<String>,
     /// Legacy display-name field accepted for backward compatibility.
     #[serde(default, rename = "name")]
     pub _name: Option<String>,
@@ -187,6 +199,17 @@ impl<'de> Deserialize<'de> for McpServerConfig {
         let disabled_tools = raw.disabled_tools.clone();
         let scopes = raw.scopes.clone();
         let oauth_resource = raw.oauth_resource.clone();
+        let oauth_client_id =
+            normalized_optional_string::<D::Error>("oauth_client_id", raw.oauth_client_id.clone())?;
+        let oauth_client_secret_env_var = normalized_optional_string::<D::Error>(
+            "oauth_client_secret_env_var",
+            raw.oauth_client_secret_env_var.clone(),
+        )?;
+        if oauth_client_secret_env_var.is_some() && oauth_client_id.is_none() {
+            return Err(SerdeError::custom(
+                "oauth_client_secret_env_var requires oauth_client_id",
+            ));
+        }
         let tools = raw.tools.clone().unwrap_or_default();
 
         fn throw_if_set<E, T>(transport: &str, field: &str, value: Option<&T>) -> Result<(), E>
@@ -212,6 +235,12 @@ impl<'de> Deserialize<'de> for McpServerConfig {
             throw_if_set("stdio", "http_headers", raw.http_headers.as_ref())?;
             throw_if_set("stdio", "env_http_headers", raw.env_http_headers.as_ref())?;
             throw_if_set("stdio", "oauth_resource", raw.oauth_resource.as_ref())?;
+            throw_if_set("stdio", "oauth_client_id", raw.oauth_client_id.as_ref())?;
+            throw_if_set(
+                "stdio",
+                "oauth_client_secret_env_var",
+                raw.oauth_client_secret_env_var.as_ref(),
+            )?;
             McpServerTransportConfig::Stdio {
                 command,
                 args: raw.args.clone().unwrap_or_default(),
@@ -246,6 +275,8 @@ impl<'de> Deserialize<'de> for McpServerConfig {
             disabled_tools,
             scopes,
             oauth_resource,
+            oauth_client_id,
+            oauth_client_secret_env_var,
             tools,
         })
     }
@@ -253,6 +284,23 @@ impl<'de> Deserialize<'de> for McpServerConfig {
 
 const fn default_enabled() -> bool {
     true
+}
+
+fn normalized_optional_string<E>(field: &str, value: Option<String>) -> Result<Option<String>, E>
+where
+    E: SerdeError,
+{
+    match value {
+        Some(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                Err(E::custom(format!("{field} cannot be empty")))
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+        None => Ok(None),
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema)]

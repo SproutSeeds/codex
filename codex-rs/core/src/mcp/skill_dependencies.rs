@@ -7,6 +7,7 @@ use codex_protocol::request_user_input::RequestUserInputArgs;
 use codex_protocol::request_user_input::RequestUserInputQuestion;
 use codex_protocol::request_user_input::RequestUserInputQuestionOption;
 use codex_protocol::request_user_input::RequestUserInputResponse;
+use codex_rmcp_client::PreconfiguredOAuthClient;
 use codex_rmcp_client::perform_oauth_login;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -243,12 +244,21 @@ pub(crate) async fn maybe_install_mcp_dependencies(
             server_config.scopes.clone(),
             oauth_config.discovered_scopes.clone(),
         );
+        let preconfigured_client =
+            server_config
+                .oauth_client_id
+                .as_ref()
+                .map(|client_id| PreconfiguredOAuthClient {
+                    client_id: client_id.clone(),
+                    client_secret_env_var: server_config.oauth_client_secret_env_var.clone(),
+                });
         let first_attempt = perform_oauth_login(
             &name,
             &oauth_config.url,
             config.mcp_oauth_credentials_store_mode,
             oauth_config.http_headers.clone(),
             oauth_config.env_http_headers.clone(),
+            preconfigured_client.clone(),
             &resolved_scopes.scopes,
             server_config.oauth_resource.as_deref(),
             config.mcp_oauth_callback_port,
@@ -272,6 +282,7 @@ pub(crate) async fn maybe_install_mcp_dependencies(
                     config.mcp_oauth_credentials_store_mode,
                     oauth_config.http_headers,
                     oauth_config.env_http_headers,
+                    preconfigured_client,
                     &[],
                     server_config.oauth_resource.as_deref(),
                     config.mcp_oauth_callback_port,
@@ -428,6 +439,8 @@ fn mcp_dependency_to_server_config(
             disabled_tools: None,
             scopes: None,
             oauth_resource: None,
+            oauth_client_id: None,
+            oauth_client_secret_env_var: None,
             tools: HashMap::new(),
         });
     }
@@ -454,6 +467,8 @@ fn mcp_dependency_to_server_config(
             disabled_tools: None,
             scopes: None,
             oauth_resource: None,
+            oauth_client_id: None,
+            oauth_client_secret_env_var: None,
             tools: HashMap::new(),
         });
     }

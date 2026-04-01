@@ -584,6 +584,8 @@ fn blocking_replace_mcp_servers_round_trips() {
             disabled_tools: None,
             scopes: None,
             oauth_resource: None,
+            oauth_client_id: None,
+            oauth_client_secret_env_var: None,
             tools: HashMap::new(),
         },
     );
@@ -610,6 +612,8 @@ fn blocking_replace_mcp_servers_round_trips() {
             disabled_tools: Some(vec!["forbidden".to_string()]),
             scopes: None,
             oauth_resource: Some("https://resource.example.com".to_string()),
+            oauth_client_id: None,
+            oauth_client_secret_env_var: None,
             tools: HashMap::new(),
         },
     );
@@ -672,6 +676,8 @@ fn blocking_replace_mcp_servers_serializes_tool_approval_overrides() {
             disabled_tools: None,
             scopes: None,
             oauth_resource: None,
+            oauth_client_id: None,
+            oauth_client_secret_env_var: None,
             tools: HashMap::from([(
                 "search".to_string(),
                 McpServerToolConfig {
@@ -732,6 +738,8 @@ foo = { command = "cmd" }
             disabled_tools: None,
             scopes: None,
             oauth_resource: None,
+            oauth_client_id: None,
+            oauth_client_secret_env_var: None,
             tools: HashMap::new(),
         },
     );
@@ -783,6 +791,8 @@ foo = { command = "cmd" } # keep me
             disabled_tools: None,
             scopes: None,
             oauth_resource: None,
+            oauth_client_id: None,
+            oauth_client_secret_env_var: None,
             tools: HashMap::new(),
         },
     );
@@ -833,6 +843,8 @@ foo = { command = "cmd", args = ["--flag"] } # keep me
             disabled_tools: None,
             scopes: None,
             oauth_resource: None,
+            oauth_client_id: None,
+            oauth_client_secret_env_var: None,
             tools: HashMap::new(),
         },
     );
@@ -884,6 +896,8 @@ foo = { command = "cmd" }
             disabled_tools: None,
             scopes: None,
             oauth_resource: None,
+            oauth_client_id: None,
+            oauth_client_secret_env_var: None,
             tools: HashMap::new(),
         },
     );

@@ -9,6 +9,7 @@ use codex_core::mcp::auth::McpOAuthLoginSupport;
 use codex_core::mcp::auth::oauth_login_support;
 use codex_core::mcp::auth::resolve_oauth_scopes;
 use codex_core::mcp::auth::should_retry_without_scopes;
+use codex_rmcp_client::PreconfiguredOAuthClient;
 use codex_rmcp_client::perform_oauth_login_silent;
 use tracing::warn;
 
@@ -41,6 +42,14 @@ impl CodexMessageProcessor {
             let store_mode = config.mcp_oauth_credentials_store_mode;
             let callback_port = config.mcp_oauth_callback_port;
             let callback_url = config.mcp_oauth_callback_url.clone();
+            let preconfigured_client =
+                server
+                    .oauth_client_id
+                    .as_ref()
+                    .map(|client_id| PreconfiguredOAuthClient {
+                        client_id: client_id.clone(),
+                        client_secret_env_var: server.oauth_client_secret_env_var.clone(),
+                    });
             let outgoing = Arc::clone(&self.outgoing);
             let notification_name = name.clone();
 
@@ -51,6 +60,7 @@ impl CodexMessageProcessor {
                     store_mode,
                     oauth_config.http_headers.clone(),
                     oauth_config.env_http_headers.clone(),
+                    preconfigured_client.clone(),
                     &resolved_scopes.scopes,
                     server.oauth_resource.as_deref(),
                     callback_port,
@@ -66,6 +76,7 @@ impl CodexMessageProcessor {
                             store_mode,
                             oauth_config.http_headers,
                             oauth_config.env_http_headers,
+                            preconfigured_client,
                             &[],
                             server.oauth_resource.as_deref(),
                             callback_port,

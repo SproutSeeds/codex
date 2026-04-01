@@ -283,6 +283,7 @@ use codex_protocol::protocol::USER_MESSAGE_BEGIN;
 use codex_protocol::protocol::W3cTraceContext;
 use codex_protocol::user_input::MAX_USER_INPUT_TEXT_CHARS;
 use codex_protocol::user_input::UserInput as CoreInputItem;
+use codex_rmcp_client::PreconfiguredOAuthClient;
 use codex_rmcp_client::perform_oauth_login_return_url;
 use codex_state::StateRuntime;
 use codex_state::ThreadMetadata;
@@ -4974,6 +4975,14 @@ impl CodexMessageProcessor {
         };
         let resolved_scopes =
             resolve_oauth_scopes(scopes, server.scopes.clone(), discovered_scopes);
+        let preconfigured_client =
+            server
+                .oauth_client_id
+                .as_ref()
+                .map(|client_id| PreconfiguredOAuthClient {
+                    client_id: client_id.clone(),
+                    client_secret_env_var: server.oauth_client_secret_env_var.clone(),
+                });
 
         match perform_oauth_login_return_url(
             &name,
@@ -4981,6 +4990,7 @@ impl CodexMessageProcessor {
             config.mcp_oauth_credentials_store_mode,
             http_headers,
             env_http_headers,
+            preconfigured_client,
             &resolved_scopes.scopes,
             server.oauth_resource.as_deref(),
             timeout_secs,

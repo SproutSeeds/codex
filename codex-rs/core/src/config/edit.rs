@@ -250,6 +250,16 @@ mod document_helpers {
         {
             entry["oauth_resource"] = value(resource.clone());
         }
+        if let Some(client_id) = &config.oauth_client_id
+            && !client_id.is_empty()
+        {
+            entry["oauth_client_id"] = value(client_id.clone());
+        }
+        if let Some(env_var) = &config.oauth_client_secret_env_var
+            && !env_var.is_empty()
+        {
+            entry["oauth_client_secret_env_var"] = value(env_var.clone());
+        }
         if !config.tools.is_empty() {
             let mut tools = new_implicit_table();
             let mut tool_entries: Vec<_> = config.tools.iter().collect();

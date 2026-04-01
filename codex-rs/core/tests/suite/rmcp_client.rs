@@ -108,6 +108,8 @@ async fn stdio_server_round_trip() -> anyhow::Result<()> {
                     disabled_tools: None,
                     scopes: None,
                     oauth_resource: None,
+                    oauth_client_id: None,
+                    oauth_client_secret_env_var: None,
                     tools: HashMap::new(),
                 },
             );
@@ -254,6 +256,8 @@ async fn stdio_image_responses_round_trip() -> anyhow::Result<()> {
                     disabled_tools: None,
                     scopes: None,
                     oauth_resource: None,
+                    oauth_client_id: None,
+                    oauth_client_secret_env_var: None,
                     tools: HashMap::new(),
                 },
             );
@@ -478,6 +482,8 @@ async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Re
                     disabled_tools: None,
                     scopes: None,
                     oauth_resource: None,
+                    oauth_client_id: None,
+                    oauth_client_secret_env_var: None,
                     tools: HashMap::new(),
                 },
             );
@@ -600,6 +606,8 @@ async fn stdio_server_propagates_whitelisted_env_vars() -> anyhow::Result<()> {
                     disabled_tools: None,
                     scopes: None,
                     oauth_resource: None,
+                    oauth_client_id: None,
+                    oauth_client_secret_env_var: None,
                     tools: HashMap::new(),
                 },
             );
@@ -763,6 +771,8 @@ async fn streamable_http_tool_call_round_trip() -> anyhow::Result<()> {
                     disabled_tools: None,
                     scopes: None,
                     oauth_resource: None,
+                    oauth_client_id: None,
+                    oauth_client_secret_env_var: None,
                     tools: HashMap::new(),
                 },
             );
@@ -986,6 +996,8 @@ async fn streamable_http_with_oauth_round_trip_impl() -> anyhow::Result<()> {
                     disabled_tools: None,
                     scopes: None,
                     oauth_resource: None,
+                    oauth_client_id: None,
+                    oauth_client_secret_env_var: None,
                     tools: HashMap::new(),
                 },
             );

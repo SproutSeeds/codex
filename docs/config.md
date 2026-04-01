@@ -12,6 +12,21 @@ Codex can connect to MCP servers configured in `~/.codex/config.toml`. See the c
 
 - https://developers.openai.com/codex/config-reference
 
+For streamable HTTP MCP servers that use OAuth, Codex also supports optional
+pre-registered client settings under `mcp_servers.<name>`:
+
+```toml
+[mcp_servers.slack]
+url = "https://mcp.slack.com/mcp"
+oauth_client_id = "your-client-id"
+oauth_client_secret_env_var = "SLACK_MCP_CLIENT_SECRET"
+```
+
+Use `oauth_client_id` when the provider requires a fixed OAuth app identity
+instead of dynamic client registration. If the provider also requires a client
+secret, point `oauth_client_secret_env_var` at the environment variable that
+contains it.
+
 ## MCP tool approvals
 
 Codex stores per-tool approval overrides for custom MCP servers under

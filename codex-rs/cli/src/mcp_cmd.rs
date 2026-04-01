@@ -22,6 +22,7 @@ use codex_core::mcp::auth::resolve_oauth_scopes;
 use codex_core::mcp::auth::should_retry_without_scopes;
 use codex_core::plugins::PluginsManager;
 use codex_protocol::protocol::McpAuthStatus;
+use codex_rmcp_client::PreconfiguredOAuthClient;
 use codex_rmcp_client::delete_oauth_tokens;
 use codex_rmcp_client::perform_oauth_login;
 use codex_utils_cli::CliConfigOverrides;
@@ -197,6 +198,7 @@ async fn perform_oauth_login_retry_without_scopes(
     store_mode: codex_rmcp_client::OAuthCredentialsStoreMode,
     http_headers: Option<HashMap<String, String>>,
     env_http_headers: Option<HashMap<String, String>>,
+    preconfigured_client: Option<PreconfiguredOAuthClient>,
     resolved_scopes: &ResolvedMcpOAuthScopes,
     oauth_resource: Option<&str>,
     callback_port: Option<u16>,
@@ -208,6 +210,7 @@ async fn perform_oauth_login_retry_without_scopes(
         store_mode,
         http_headers.clone(),
         env_http_headers.clone(),
+        preconfigured_client.clone(),
         &resolved_scopes.scopes,
         oauth_resource,
         callback_port,
@@ -224,6 +227,7 @@ async fn perform_oauth_login_retry_without_scopes(
                 store_mode,
                 http_headers,
                 env_http_headers,
+                preconfigured_client,
                 &[],
                 oauth_resource,
                 callback_port,
@@ -233,6 +237,16 @@ async fn perform_oauth_login_retry_without_scopes(
         }
         Err(err) => Err(err),
     }
+}
+
+fn configured_oauth_client(server: &McpServerConfig) -> Option<PreconfiguredOAuthClient> {
+    server
+        .oauth_client_id
+        .as_ref()
+        .map(|client_id| PreconfiguredOAuthClient {
+            client_id: client_id.clone(),
+            client_secret_env_var: server.oauth_client_secret_env_var.clone(),
+        })
 }
 
 async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Result<()> {
@@ -306,6 +320,8 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
         disabled_tools: None,
         scopes: None,
         oauth_resource: None,
+        oauth_client_id: None,
+        oauth_client_secret_env_var: None,
         tools: HashMap::new(),
     };
 
@@ -333,6 +349,7 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
                 config.mcp_oauth_credentials_store_mode,
                 oauth_config.http_headers,
                 oauth_config.env_http_headers,
+                /*preconfigured_client*/ None,
                 &resolved_scopes,
                 /*oauth_resource*/ None,
                 config.mcp_oauth_callback_port,
@@ -424,6 +441,7 @@ async fn run_login(config_overrides: &CliConfigOverrides, login_args: LoginArgs)
         config.mcp_oauth_credentials_store_mode,
         http_headers,
         env_http_headers,
+        configured_oauth_client(server),
         &resolved_scopes,
         server.oauth_resource.as_deref(),
         config.mcp_oauth_callback_port,
@@ -523,6 +541,8 @@ async fn run_list(config_overrides: &CliConfigOverrides, list_args: ListArgs) ->
                     "enabled": cfg.enabled,
                     "disabled_reason": cfg.disabled_reason.as_ref().map(ToString::to_string),
                     "transport": transport,
+                    "oauth_client_id": cfg.oauth_client_id,
+                    "oauth_client_secret_env_var": cfg.oauth_client_secret_env_var,
                     "startup_timeout_sec": cfg
                         .startup_timeout_sec
                         .map(|timeout| timeout.as_secs_f64()),
@@ -763,6 +783,8 @@ async fn run_get(config_overrides: &CliConfigOverrides, get_args: GetArgs) -> Re
             "transport": transport,
             "enabled_tools": server.enabled_tools.clone(),
             "disabled_tools": server.disabled_tools.clone(),
+            "oauth_client_id": server.oauth_client_id.clone(),
+            "oauth_client_secret_env_var": server.oauth_client_secret_env_var.clone(),
             "startup_timeout_sec": server
                 .startup_timeout_sec
                 .map(|timeout| timeout.as_secs_f64()),
@@ -861,6 +883,11 @@ async fn run_get(config_overrides: &CliConfigOverrides, get_args: GetArgs) -> Re
                 _ => "-".to_string(),
             };
             println!("  env_http_headers: {env_headers_display}");
+            let oauth_client_id_display = server.oauth_client_id.as_deref().unwrap_or("-");
+            println!("  oauth_client_id: {oauth_client_id_display}");
+            let oauth_client_secret_display =
+                server.oauth_client_secret_env_var.as_deref().unwrap_or("-");
+            println!("  oauth_client_secret_env_var: {oauth_client_secret_display}");
         }
     }
     if let Some(timeout) = server.startup_timeout_sec {

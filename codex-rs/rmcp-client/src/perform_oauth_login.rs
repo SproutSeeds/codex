@@ -9,6 +9,8 @@ use anyhow::anyhow;
 use anyhow::bail;
 use reqwest::ClientBuilder;
 use reqwest::Url;
+use rmcp::transport::auth::AuthorizationSession;
+use rmcp::transport::auth::OAuthClientConfig;
 use rmcp::transport::auth::OAuthState;
 use tiny_http::Response;
 use tiny_http::Server;
@@ -27,6 +29,12 @@ use crate::utils::build_default_headers;
 struct OauthHeaders {
     http_headers: Option<HashMap<String, String>>,
     env_http_headers: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreconfiguredOAuthClient {
+    pub client_id: String,
+    pub client_secret_env_var: Option<String>,
 }
 
 struct CallbackServerGuard {
@@ -76,6 +84,7 @@ pub async fn perform_oauth_login(
     store_mode: OAuthCredentialsStoreMode,
     http_headers: Option<HashMap<String, String>>,
     env_http_headers: Option<HashMap<String, String>>,
+    preconfigured_client: Option<PreconfiguredOAuthClient>,
     scopes: &[String],
     oauth_resource: Option<&str>,
     callback_port: Option<u16>,
@@ -87,6 +96,7 @@ pub async fn perform_oauth_login(
         store_mode,
         http_headers,
         env_http_headers,
+        preconfigured_client,
         scopes,
         oauth_resource,
         callback_port,
@@ -103,6 +113,7 @@ pub async fn perform_oauth_login_silent(
     store_mode: OAuthCredentialsStoreMode,
     http_headers: Option<HashMap<String, String>>,
     env_http_headers: Option<HashMap<String, String>>,
+    preconfigured_client: Option<PreconfiguredOAuthClient>,
     scopes: &[String],
     oauth_resource: Option<&str>,
     callback_port: Option<u16>,
@@ -114,6 +125,7 @@ pub async fn perform_oauth_login_silent(
         store_mode,
         http_headers,
         env_http_headers,
+        preconfigured_client,
         scopes,
         oauth_resource,
         callback_port,
@@ -130,6 +142,7 @@ async fn perform_oauth_login_with_browser_output(
     store_mode: OAuthCredentialsStoreMode,
     http_headers: Option<HashMap<String, String>>,
     env_http_headers: Option<HashMap<String, String>>,
+    preconfigured_client: Option<PreconfiguredOAuthClient>,
     scopes: &[String],
     oauth_resource: Option<&str>,
     callback_port: Option<u16>,
@@ -145,6 +158,7 @@ async fn perform_oauth_login_with_browser_output(
         server_url,
         store_mode,
         headers,
+        preconfigured_client,
         scopes,
         oauth_resource,
         /*launch_browser*/ true,
@@ -164,6 +178,7 @@ pub async fn perform_oauth_login_return_url(
     store_mode: OAuthCredentialsStoreMode,
     http_headers: Option<HashMap<String, String>>,
     env_http_headers: Option<HashMap<String, String>>,
+    preconfigured_client: Option<PreconfiguredOAuthClient>,
     scopes: &[String],
     oauth_resource: Option<&str>,
     timeout_secs: Option<i64>,
@@ -179,6 +194,7 @@ pub async fn perform_oauth_login_return_url(
         server_url,
         store_mode,
         headers,
+        preconfigured_client,
         scopes,
         oauth_resource,
         /*launch_browser*/ false,
@@ -399,6 +415,61 @@ fn callback_bind_host(callback_url: Option<&str>) -> &'static str {
     }
 }
 
+fn resolve_oauth_client_secret(env_var: Option<&str>) -> Result<Option<String>> {
+    let Some(env_var) = env_var else {
+        return Ok(None);
+    };
+
+    match std::env::var(env_var) {
+        Ok(secret) => {
+            let trimmed = secret.trim();
+            if trimmed.is_empty() {
+                bail!("OAuth client secret env var `{env_var}` is empty");
+            }
+            Ok(Some(trimmed.to_string()))
+        }
+        Err(std::env::VarError::NotPresent) => {
+            bail!("OAuth client secret env var `{env_var}` is not set")
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            bail!("OAuth client secret env var `{env_var}` is not valid UTF-8")
+        }
+    }
+}
+
+async fn start_authorization_with_preconfigured_client(
+    server_url: &str,
+    http_client: reqwest::Client,
+    client: &PreconfiguredOAuthClient,
+    scopes: &[String],
+    redirect_uri: &str,
+) -> Result<OAuthState> {
+    let oauth_client_config = OAuthClientConfig {
+        client_id: client.client_id.clone(),
+        client_secret: resolve_oauth_client_secret(client.client_secret_env_var.as_deref())?,
+        scopes: scopes.to_vec(),
+        redirect_uri: redirect_uri.to_string(),
+    };
+
+    let oauth_state = OAuthState::new(server_url, Some(http_client)).await?;
+    let scope_refs: Vec<&str> = scopes.iter().map(String::as_str).collect();
+
+    match oauth_state {
+        OAuthState::Unauthorized(mut manager) => {
+            let metadata = manager.discover_metadata().await?;
+            manager.set_metadata(metadata);
+            manager.configure_client(oauth_client_config)?;
+            let auth_url = manager.get_authorization_url(&scope_refs).await?;
+            Ok(OAuthState::Session(AuthorizationSession {
+                auth_manager: manager,
+                auth_url,
+                redirect_uri: redirect_uri.to_string(),
+            }))
+        }
+        _ => bail!("OAuth state did not begin in the unauthorized state"),
+    }
+}
+
 impl OauthLoginFlow {
     #[allow(clippy::too_many_arguments)]
     async fn new(
@@ -406,6 +477,7 @@ impl OauthLoginFlow {
         server_url: &str,
         store_mode: OAuthCredentialsStoreMode,
         headers: OauthHeaders,
+        preconfigured_client: Option<PreconfiguredOAuthClient>,
         scopes: &[String],
         oauth_resource: Option<&str>,
         launch_browser: bool,
@@ -440,11 +512,23 @@ impl OauthLoginFlow {
         let default_headers = build_default_headers(http_headers, env_http_headers)?;
         let http_client = apply_default_headers(ClientBuilder::new(), &default_headers).build()?;
 
-        let mut oauth_state = OAuthState::new(server_url, Some(http_client)).await?;
-        let scope_refs: Vec<&str> = scopes.iter().map(String::as_str).collect();
-        oauth_state
-            .start_authorization(&scope_refs, &redirect_uri, Some("Codex"))
-            .await?;
+        let oauth_state = if let Some(preconfigured_client) = preconfigured_client.as_ref() {
+            start_authorization_with_preconfigured_client(
+                server_url,
+                http_client,
+                preconfigured_client,
+                scopes,
+                &redirect_uri,
+            )
+            .await?
+        } else {
+            let mut oauth_state = OAuthState::new(server_url, Some(http_client)).await?;
+            let scope_refs: Vec<&str> = scopes.iter().map(String::as_str).collect();
+            oauth_state
+                .start_authorization(&scope_refs, &redirect_uri, Some("Codex"))
+                .await?;
+            oauth_state
+        };
         let auth_url = append_query_param(
             &oauth_state.get_authorization_url().await?,
             "resource",

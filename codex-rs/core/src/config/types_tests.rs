@@ -229,6 +229,24 @@ fn deserialize_streamable_http_server_config_with_oauth_resource() {
 }
 
 #[test]
+fn deserialize_streamable_http_server_config_with_oauth_client() {
+    let cfg: McpServerConfig = toml::from_str(
+        r#"
+            url = "https://example.com/mcp"
+            oauth_client_id = "slack-client-id"
+            oauth_client_secret_env_var = "SLACK_CLIENT_SECRET"
+        "#,
+    )
+    .expect("should deserialize http config with pre-registered OAuth client");
+
+    assert_eq!(cfg.oauth_client_id, Some("slack-client-id".to_string()));
+    assert_eq!(
+        cfg.oauth_client_secret_env_var,
+        Some("SLACK_CLIENT_SECRET".to_string())
+    );
+}
+
+#[test]
 fn deserialize_server_config_with_tool_filters() {
     let cfg: McpServerConfig = toml::from_str(
         r#"
@@ -272,6 +290,8 @@ fn deserialize_ignores_unknown_server_fields() {
             disabled_tools: None,
             scopes: None,
             oauth_resource: None,
+            oauth_client_id: None,
+            oauth_client_secret_env_var: None,
             tools: HashMap::new(),
         }
     );
@@ -371,6 +391,20 @@ fn deserialize_rejects_headers_for_stdio() {
             .contains("oauth_resource is not supported for stdio"),
         "unexpected error: {err}"
     );
+
+    let err = toml::from_str::<McpServerConfig>(
+        r#"
+            command = "echo"
+            oauth_client_id = "client-id"
+        "#,
+    )
+    .expect_err("should reject oauth_client_id for stdio transport");
+
+    assert!(
+        err.to_string()
+            .contains("oauth_client_id is not supported for stdio"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]
@@ -387,4 +421,26 @@ fn deserialize_rejects_inline_bearer_token_field() {
         err.to_string().contains("bearer_token is not supported"),
         "unexpected error: {err}"
     );
+}
+
+#[test]
+fn deserialize_rejects_oauth_client_secret_without_client_id() {
+    toml::from_str::<McpServerConfig>(
+        r#"
+            url = "https://example.com/mcp"
+            oauth_client_secret_env_var = "CLIENT_SECRET"
+        "#,
+    )
+    .expect_err("should require oauth_client_id when secret env var is set");
+}
+
+#[test]
+fn deserialize_rejects_empty_oauth_client_id() {
+    toml::from_str::<McpServerConfig>(
+        r#"
+            url = "https://example.com/mcp"
+            oauth_client_id = "   "
+        "#,
+    )
+    .expect_err("should reject empty oauth_client_id");
 }
