@@ -194,7 +194,7 @@ fn write_stdin_tool_matches_expected_spec() {
         (
             "yield_time_ms".to_string(),
             JsonSchema::number(Some(
-                "How long to wait (in milliseconds) for output before yielding.".to_string(),
+                "How long to wait (in milliseconds) for output before yielding. Empty polls may wait longer, up to the configured background terminal timeout, and still return as soon as output arrives.".to_string(),
             )),
         ),
         (

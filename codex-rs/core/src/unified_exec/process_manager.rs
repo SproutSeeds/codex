@@ -30,7 +30,6 @@ use crate::tools::sandboxing::ToolError;
 use crate::unified_exec::ExecCommandRequest;
 use crate::unified_exec::MAX_UNIFIED_EXEC_PROCESSES;
 use crate::unified_exec::MAX_YIELD_TIME_MS;
-use crate::unified_exec::MIN_EMPTY_YIELD_TIME_MS;
 use crate::unified_exec::MIN_YIELD_TIME_MS;
 use crate::unified_exec::ProcessEntry;
 use crate::unified_exec::ProcessStore;
@@ -72,6 +71,28 @@ const UNIFIED_EXEC_ENV: [(&str, &str); 10] = [
 const NETWORK_ACCESS_DENIED_MESSAGE: &str =
     "Network access was denied by the Codex sandbox network proxy.";
 const LATE_NETWORK_DENIAL_GRACE_PERIOD: Duration = Duration::from_millis(100);
+
+#[derive(Clone, Copy)]
+pub(super) struct CollectOutputOptions {
+    deadline: Instant,
+    return_after_first_output: bool,
+}
+
+impl CollectOutputOptions {
+    pub(super) fn until_deadline(deadline: Instant) -> Self {
+        Self {
+            deadline,
+            return_after_first_output: false,
+        }
+    }
+
+    pub(super) fn until_first_output(deadline: Instant) -> Self {
+        Self {
+            deadline,
+            return_after_first_output: true,
+        }
+    }
+}
 
 /// Test-only override for deterministic unified exec process IDs.
 ///
@@ -452,7 +473,7 @@ impl UnifiedExecProcessManager {
                     .session
                     .subscribe_out_of_band_elicitation_pause_state(),
             ),
-            deadline,
+            CollectOutputOptions::until_deadline(deadline),
         )
         .await;
         let wall_time = Instant::now().saturating_duration_since(start);
@@ -639,14 +660,19 @@ impl UnifiedExecProcessManager {
             }
         }
 
+        let empty_poll = request.input.is_empty();
         let yield_time_ms = {
-            // Empty polls use configurable background timeout bounds. Non-empty
-            // writes keep a fixed max cap so interactive stdin remains responsive.
-            let time_ms = request.yield_time_ms.max(MIN_YIELD_TIME_MS);
-            if request.input.is_empty() {
-                time_ms.clamp(MIN_EMPTY_YIELD_TIME_MS, self.max_write_stdin_yield_time_ms)
+            if empty_poll {
+                // Empty polls should wait up to the configured background timeout
+                // so a single tool call can bridge longer silent periods without
+                // bouncing back to the model every few seconds.
+                self.max_write_stdin_yield_time_ms
             } else {
-                time_ms.min(MAX_YIELD_TIME_MS)
+                // Non-empty writes keep a fixed max cap so interactive stdin
+                // remains responsive after sending input.
+                request
+                    .yield_time_ms
+                    .clamp(MIN_YIELD_TIME_MS, MAX_YIELD_TIME_MS)
             }
         };
         let start = Instant::now();
@@ -658,7 +684,11 @@ impl UnifiedExecProcessManager {
             &output_closed_notify,
             &cancellation_token,
             pause_state,
-            deadline,
+            if empty_poll {
+                CollectOutputOptions::until_first_output(deadline)
+            } else {
+                CollectOutputOptions::until_deadline(deadline)
+            },
         )
         .await;
         let wall_time = Instant::now().saturating_duration_since(start);
@@ -1074,10 +1104,11 @@ impl UnifiedExecProcessManager {
         output_closed_notify: &Arc<Notify>,
         cancellation_token: &CancellationToken,
         mut pause_state: Option<watch::Receiver<bool>>,
-        mut deadline: Instant,
+        options: CollectOutputOptions,
     ) -> Vec<u8> {
         const POST_EXIT_CLOSE_WAIT_CAP: Duration = Duration::from_millis(50);
 
+        let mut deadline = options.deadline;
         let mut collected: Vec<u8> = Vec::with_capacity(4096);
         let mut exit_signal_received = cancellation_token.is_cancelled();
         let mut post_exit_deadline: Option<Instant> = None;
@@ -1145,6 +1176,10 @@ impl UnifiedExecProcessManager {
 
             for chunk in drained_chunks {
                 collected.extend_from_slice(&chunk);
+            }
+
+            if options.return_after_first_output && !collected.is_empty() {
+                break;
             }
 
             exit_signal_received |= cancellation_token.is_cancelled();

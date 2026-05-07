@@ -8,7 +8,9 @@ use crate::session::tests::make_session_and_context;
 use crate::session::turn_context::TurnContext;
 use crate::tools::context::ExecCommandToolOutput;
 use crate::unified_exec::WriteStdinRequest;
+use crate::unified_exec::process::OutputBuffer;
 use crate::unified_exec::process::OutputHandles;
+use crate::unified_exec::process_manager::CollectOutputOptions;
 use codex_sandboxing::SandboxType;
 use codex_utils_output_truncation::approx_token_count;
 use core_test_support::get_remote_test_env;
@@ -18,8 +20,11 @@ use pretty_assertions::assert_eq;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use tokio::sync::Notify;
 use tokio::time::Duration;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 async fn test_session_and_turn() -> (Arc<Session>, Arc<TurnContext>) {
     let (session, turn) = make_session_and_context().await;
@@ -142,7 +147,7 @@ async fn exec_command_with_tty(
         &output_closed_notify,
         &cancellation_token,
         Some(session.subscribe_out_of_band_elicitation_pause_state()),
-        deadline,
+        CollectOutputOptions::until_deadline(deadline),
     )
     .await;
     let wall_time = Instant::now().saturating_duration_since(started_at);
@@ -229,6 +234,46 @@ fn head_tail_buffer_default_preserves_prefix_and_suffix() {
     let rendered = buffer.to_bytes();
     assert_eq!(rendered.first(), Some(&b'a'));
     assert!(rendered.ends_with(b"bc"));
+}
+
+#[tokio::test]
+async fn collect_output_until_deadline_returns_after_first_output_for_empty_polls() {
+    const DELAYED_MARKER: &[u8] = b"delayed-unified-exec-marker";
+
+    let output_buffer: OutputBuffer = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
+    let output_notify = Arc::new(Notify::new());
+    let output_closed = Arc::new(AtomicBool::new(false));
+    let output_closed_notify = Arc::new(Notify::new());
+    let cancellation_token = CancellationToken::new();
+
+    let delayed_output_buffer = Arc::clone(&output_buffer);
+    let delayed_output_notify = Arc::clone(&output_notify);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        delayed_output_buffer
+            .lock()
+            .await
+            .push_chunk(DELAYED_MARKER.to_vec());
+        delayed_output_notify.notify_waiters();
+    });
+
+    let start = Instant::now();
+    let collected = UnifiedExecProcessManager::collect_output_until_deadline(
+        &output_buffer,
+        &output_notify,
+        &output_closed,
+        &output_closed_notify,
+        &cancellation_token,
+        /*pause_state*/ None,
+        CollectOutputOptions::until_first_output(start + Duration::from_secs(5)),
+    )
+    .await;
+
+    assert_eq!(collected, DELAYED_MARKER);
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "empty polls should return soon after fresh output arrives instead of waiting for the full background timeout"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -360,6 +405,38 @@ async fn unified_exec_timeouts() -> anyhow::Result<()> {
     assert!(
         out_3.truncated_output().contains(TEST_VAR_VALUE),
         "subsequent poll should retrieve output"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn empty_write_stdin_polls_wait_up_to_background_timeout() -> anyhow::Result<()> {
+    skip_if_sandbox!(Ok(()));
+
+    const DELAYED_MARKER: &str = "delayed-unified-exec-marker";
+
+    let (session, turn) = test_session_and_turn().await;
+
+    let open_shell = exec_command(
+        &session, &turn, "bash -i", /*yield_time_ms*/ 2_500, /*workdir*/ None,
+    )
+    .await?;
+    let process_id = open_shell.process_id.expect("expected process id");
+
+    write_stdin(
+        &session,
+        process_id,
+        &format!("sleep 5.5 && echo {DELAYED_MARKER}\n"),
+        /*yield_time_ms*/ 10,
+    )
+    .await?;
+
+    let out = write_stdin(&session, process_id, "", /*yield_time_ms*/ 100).await?;
+
+    assert!(
+        out.truncated_output().contains(DELAYED_MARKER),
+        "empty polls should stay open long enough to capture output that arrives after 5 seconds"
     );
 
     Ok(())
@@ -578,7 +655,7 @@ async fn unified_exec_uses_remote_exec_server_when_configured() -> anyhow::Resul
         &output_closed_notify,
         &cancellation_token,
         /*pause_state*/ None,
-        Instant::now() + Duration::from_millis(2_500),
+        CollectOutputOptions::until_deadline(Instant::now() + Duration::from_millis(2_500)),
     )
     .await;
 
