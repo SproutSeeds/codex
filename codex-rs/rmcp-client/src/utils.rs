@@ -1,5 +1,7 @@
+use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use codex_client::maybe_build_rustls_client_config_with_custom_ca;
 use codex_config::types::McpServerEnvVar;
 use reqwest::ClientBuilder;
 use reqwest::header::HeaderMap;
@@ -124,6 +126,17 @@ pub(crate) fn apply_default_headers(
     } else {
         builder.default_headers(default_headers.clone())
     }
+}
+
+pub(crate) fn build_reqwest_client_with_custom_ca(
+    builder: ClientBuilder,
+) -> Result<reqwest::Client> {
+    let builder = match maybe_build_rustls_client_config_with_custom_ca()? {
+        Some(tls_config) => builder.use_preconfigured_tls(Some((*tls_config).clone())),
+        None => builder,
+    };
+
+    builder.build().context("failed to build reqwest client")
 }
 
 #[cfg(unix)]

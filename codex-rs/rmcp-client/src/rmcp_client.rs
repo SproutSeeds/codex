@@ -12,7 +12,6 @@ use std::time::Instant;
 use anyhow::Result;
 use anyhow::anyhow;
 use codex_api::SharedAuthProvider;
-use codex_client::build_reqwest_client_with_custom_ca;
 use codex_config::types::McpServerEnvVar;
 use codex_exec_server::HttpClient;
 use futures::FutureExt;
@@ -72,6 +71,7 @@ use crate::stdio_server_launcher::StdioServerProcessHandle;
 use crate::stdio_server_launcher::StdioServerTransport;
 use crate::utils::apply_default_headers;
 use crate::utils::build_default_headers;
+use crate::utils::build_reqwest_client_with_custom_ca;
 use codex_config::types::OAuthCredentialsStoreMode;
 
 enum PendingTransport {

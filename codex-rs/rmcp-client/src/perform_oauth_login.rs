@@ -9,7 +9,6 @@ use anyhow::anyhow;
 use anyhow::bail;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use reqwest::ClientBuilder;
 use reqwest::Url;
 use rmcp::transport::AuthorizationManager;
 use rmcp::transport::AuthorizationSession;
@@ -29,6 +28,7 @@ use crate::oauth::compute_expires_at_millis;
 use crate::save_oauth_tokens;
 use crate::utils::apply_default_headers;
 use crate::utils::build_default_headers;
+use crate::utils::build_reqwest_client_with_custom_ca;
 use codex_config::types::OAuthCredentialsStoreMode;
 
 struct OauthHeaders {
@@ -456,6 +456,18 @@ impl OauthLoginFlow {
     ) -> Result<Self> {
         const DEFAULT_OAUTH_TIMEOUT_SECS: i64 = 300;
 
+        let oauth_resource = oauth_resource
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if let Some(oauth_resource) = oauth_resource
+            && oauth_resource != server_url
+        {
+            bail!(
+                "oauth_resource values that differ from the MCP server URL are not supported by \
+                 the current rmcp OAuth flow; set oauth_resource to `{server_url}` or omit it"
+            );
+        }
+
         let bind_host = callback_bind_host(callback_url);
         let callback_port = resolve_callback_port(callback_port)?;
         let bind_addr = match callback_port {
@@ -481,7 +493,10 @@ impl OauthLoginFlow {
             env_http_headers,
         } = headers;
         let default_headers = build_default_headers(http_headers, env_http_headers)?;
-        let http_client = apply_default_headers(ClientBuilder::new(), &default_headers).build()?;
+        let http_client = build_reqwest_client_with_custom_ca(apply_default_headers(
+            reqwest::Client::builder(),
+            &default_headers,
+        ))?;
 
         let scope_refs: Vec<&str> = scopes.iter().map(String::as_str).collect();
         let oauth_state = start_authorization(
@@ -645,8 +660,20 @@ fn append_query_param(url: &str, key: &str, value: Option<&str>) -> String {
         return url.to_string();
     }
     if let Ok(mut parsed) = Url::parse(url) {
+        if parsed.query_pairs().any(|(name, _)| name == key) {
+            return parsed.to_string();
+        }
         parsed.query_pairs_mut().append_pair(key, value);
         return parsed.to_string();
+    }
+    if let Some((_, query)) = url.split_once('?')
+        && query.split('&').any(|pair| {
+            pair.split_once('=')
+                .map(|(name, _)| name == key)
+                .unwrap_or(false)
+        })
+    {
+        return url.to_string();
     }
     let encoded = urlencoding::encode(value);
     let separator = if url.contains('?') { "&" } else { "?" };
@@ -861,6 +888,20 @@ mod tests {
         );
 
         assert_eq!(url, "https://example.com/authorize?scope=read");
+    }
+
+    #[test]
+    fn append_query_param_ignores_existing_key() {
+        let url = append_query_param(
+            "https://example.com/authorize?resource=https%3A%2F%2Fapi.example.com",
+            "resource",
+            Some("https://api.example.com"),
+        );
+
+        assert_eq!(
+            url,
+            "https://example.com/authorize?resource=https%3A%2F%2Fapi.example.com"
+        );
     }
 
     #[test]
