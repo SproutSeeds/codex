@@ -218,6 +218,18 @@ impl ModelProvider for ConfiguredModelProvider {
         &self.info
     }
 
+    fn capabilities(&self) -> ProviderCapabilities {
+        if self.info.is_oss() {
+            ProviderCapabilities {
+                namespace_tools: true,
+                image_generation: false,
+                web_search: false,
+            }
+        } else {
+            ProviderCapabilities::default()
+        }
+    }
+
     fn auth_manager(&self) -> Option<Arc<AuthManager>> {
         self.auth_manager.clone()
     }
@@ -412,6 +424,26 @@ mod tests {
         );
 
         assert_eq!(provider.capabilities(), ProviderCapabilities::default());
+    }
+
+    #[test]
+    fn oss_provider_disables_hosted_capabilities() {
+        let provider = create_model_provider(
+            codex_model_provider_info::create_oss_provider_with_base_url(
+                "http://localhost:11434/v1",
+                codex_model_provider_info::WireApi::Responses,
+            ),
+            /*auth_manager*/ None,
+        );
+
+        assert_eq!(
+            provider.capabilities(),
+            ProviderCapabilities {
+                namespace_tools: true,
+                image_generation: false,
+                web_search: false,
+            }
+        );
     }
 
     #[test]

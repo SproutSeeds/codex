@@ -35,6 +35,7 @@ const MAX_REQUEST_MAX_RETRIES: u64 = 100;
 const OPENAI_PROVIDER_NAME: &str = "OpenAI";
 pub const OPENAI_PROVIDER_ID: &str = "openai";
 pub const CHATGPT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+const OSS_PROVIDER_NAME: &str = "gpt-oss";
 const AMAZON_BEDROCK_PROVIDER_NAME: &str = "Amazon Bedrock";
 pub const AMAZON_BEDROCK_PROVIDER_ID: &str = "amazon-bedrock";
 pub const AMAZON_BEDROCK_GPT_5_5_MODEL_ID: &str = "openai.gpt-5.5";
@@ -392,6 +393,10 @@ impl ModelProviderInfo {
         self.name == OPENAI_PROVIDER_NAME
     }
 
+    pub fn is_oss(&self) -> bool {
+        self.name == OSS_PROVIDER_NAME
+    }
+
     pub fn is_amazon_bedrock(&self) -> bool {
         self.name == AMAZON_BEDROCK_PROVIDER_NAME
     }
@@ -499,7 +504,7 @@ pub fn create_oss_provider(default_provider_port: u16, wire_api: WireApi) -> Mod
 
 pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> ModelProviderInfo {
     ModelProviderInfo {
-        name: "gpt-oss".into(),
+        name: OSS_PROVIDER_NAME.into(),
         base_url: Some(base_url.into()),
         env_key: None,
         env_key_instructions: None,
