@@ -1523,4 +1523,22 @@ async fn hosted_tools_follow_provider_auth_model_and_config_gates() {
     })
     .await;
     oss_provider.assert_visible_lacks(&["web_search"]);
+
+    let oss_standalone_web_search = probe_with(
+        |turn| {
+            set_web_search_mode(turn, WebSearchMode::Live);
+            use_ollama_provider(turn);
+        },
+        ToolPlanInputs {
+            extension_tool_executors: vec![Arc::new(WebRunExtensionTool)],
+            ..Default::default()
+        },
+    )
+    .await;
+    oss_standalone_web_search.assert_visible_lacks(&["web_search"]);
+    oss_standalone_web_search.assert_visible_contains(&["web"]);
+    assert_eq!(
+        oss_standalone_web_search.namespace_function_names("web"),
+        &["run".to_string()]
+    );
 }

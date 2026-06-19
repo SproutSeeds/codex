@@ -37,13 +37,33 @@ struct WebSearchExtensionConfig {
 impl From<&Config> for WebSearchExtensionConfig {
     fn from(config: &Config) -> Self {
         let web_search_mode = config.web_search_mode.value();
+        let provider = search_provider_for_model_provider(&config.model_provider, web_search_mode);
         Self {
-            // Core selects this executor per turn using the feature flag or model metadata.
-            available: config.model_provider.is_openai()
-                && web_search_mode != WebSearchMode::Disabled,
-            provider: config.model_provider.clone(),
+            // Core selects this executor per turn using the feature flag, model metadata,
+            // or the local OSS provider bridge.
+            available: provider.is_some(),
+            provider: provider.unwrap_or_else(|| config.model_provider.clone()),
             settings: search_settings(config, web_search_mode),
         }
+    }
+}
+
+fn search_provider_for_model_provider(
+    model_provider: &ModelProviderInfo,
+    web_search_mode: WebSearchMode,
+) -> Option<ModelProviderInfo> {
+    if web_search_mode == WebSearchMode::Disabled {
+        return None;
+    }
+
+    if model_provider.is_openai() {
+        Some(model_provider.clone())
+    } else if model_provider.is_oss() {
+        Some(ModelProviderInfo::create_openai_provider(
+            /*base_url*/ None,
+        ))
+    } else {
+        None
     }
 }
 
@@ -144,12 +164,15 @@ mod tests {
     use codex_extension_api::ToolName;
     use codex_login::CodexAuth;
     use codex_model_provider_info::ModelProviderInfo;
+    use codex_model_provider_info::WireApi;
+    use codex_protocol::config_types::WebSearchMode;
     use pretty_assertions::assert_eq;
 
     use super::AuthManager;
     use super::Config;
     use super::WebSearchExtensionConfig;
     use super::install;
+    use super::search_provider_for_model_provider;
     use crate::tool::RUN_TOOL_NAME;
     use crate::tool::WEB_NAMESPACE;
 
@@ -179,6 +202,32 @@ mod tests {
         assert_eq!(
             tool_names,
             vec![(ToolName::namespaced(WEB_NAMESPACE, RUN_TOOL_NAME), true)]
+        );
+    }
+
+    #[test]
+    fn oss_provider_uses_openai_search_backend() {
+        let model_provider = codex_model_provider_info::create_oss_provider_with_base_url(
+            "http://localhost:11434/v1",
+            WireApi::Responses,
+        );
+
+        let search_provider =
+            search_provider_for_model_provider(&model_provider, WebSearchMode::Live)
+                .expect("OSS providers should bridge standalone web search through OpenAI");
+
+        assert!(search_provider.is_openai());
+    }
+
+    #[test]
+    fn disabled_web_search_contributes_no_search_provider() {
+        let model_provider = codex_model_provider_info::create_oss_provider_with_base_url(
+            "http://localhost:11434/v1",
+            WireApi::Responses,
+        );
+
+        assert!(
+            search_provider_for_model_provider(&model_provider, WebSearchMode::Disabled).is_none()
         );
     }
 }
