@@ -23,6 +23,7 @@ use codex_tools::ResponsesApiNamespaceTool;
 use codex_tools::ToolExposure;
 use codex_tools::default_namespace_description;
 use http::HeaderMap;
+use serde_json::Value;
 use url::Url;
 
 use crate::history::recent_input;
@@ -149,12 +150,92 @@ impl WebSearchTool {
 
 fn parse_commands(call: &ToolCall) -> Result<SearchCommands, FunctionCallError> {
     let arguments = call.function_arguments()?;
+    parse_search_commands(arguments)
+        .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))
+}
+
+fn parse_search_commands(arguments: &str) -> Result<SearchCommands, serde_json::Error> {
     if arguments.trim().is_empty() {
         return Ok(SearchCommands::default());
     }
 
-    serde_json::from_str(arguments)
-        .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))
+    let original_err = match serde_json::from_str(arguments) {
+        Ok(commands) => return Ok(commands),
+        Err(err) => err,
+    };
+    let Some(commands) = parse_lenient_search_commands(arguments) else {
+        return Err(original_err);
+    };
+    Ok(commands)
+}
+
+fn parse_lenient_search_commands(arguments: &str) -> Option<SearchCommands> {
+    let value = serde_json::from_str::<Value>(arguments).ok()?;
+    search_commands_from_lenient_value(value)
+}
+
+fn search_commands_from_lenient_value(value: Value) -> Option<SearchCommands> {
+    match value {
+        Value::String(query) => Some(SearchCommands {
+            search_query: Some(vec![search_query(query)]),
+            ..Default::default()
+        }),
+        Value::Array(values) => Some(SearchCommands {
+            search_query: Some(query_values(values)?),
+            ..Default::default()
+        }),
+        Value::Object(commands) if commands.contains_key("q") => {
+            let query = search_query_from_value(Value::Object(commands))?;
+            Some(SearchCommands {
+                search_query: Some(vec![query]),
+                ..Default::default()
+            })
+        }
+        Value::Object(mut commands) => {
+            normalize_query_field(&mut commands, "search_query")?;
+            normalize_query_field(&mut commands, "image_query")?;
+            serde_json::from_value(Value::Object(commands)).ok()
+        }
+        _ => None,
+    }
+}
+
+fn normalize_query_field(commands: &mut serde_json::Map<String, Value>, field: &str) -> Option<()> {
+    let Some(value) = commands.remove(field) else {
+        return Some(());
+    };
+    let values = match value {
+        Value::Array(values) => values,
+        value => vec![value],
+    };
+    commands.insert(field.to_string(), Value::Array(query_json_values(values)?));
+    Some(())
+}
+
+fn query_json_values(values: Vec<Value>) -> Option<Vec<Value>> {
+    query_values(values)?
+        .into_iter()
+        .map(|query| serde_json::to_value(query).ok())
+        .collect()
+}
+
+fn query_values(values: Vec<Value>) -> Option<Vec<SearchQuery>> {
+    values.into_iter().map(search_query_from_value).collect()
+}
+
+fn search_query_from_value(value: Value) -> Option<SearchQuery> {
+    match value {
+        Value::String(query) => Some(search_query(query)),
+        value => serde_json::from_value(value).ok(),
+    }
+}
+
+fn search_query(query: String) -> SearchQuery {
+    SearchQuery {
+        q: query,
+        recency: None,
+        domains: None,
+    }
 }
 
 fn command_action(commands: &SearchCommands) -> WebSearchAction {
@@ -215,10 +296,12 @@ fn web_search_item(call_id: &str, action: WebSearchAction) -> ExtensionTurnItem 
 #[cfg(test)]
 mod tests {
     use codex_api::SearchCommands;
+    use codex_api::SearchQuery;
     use codex_protocol::models::WebSearchAction;
     use pretty_assertions::assert_eq;
 
     use super::command_action;
+    use super::parse_search_commands;
 
     #[test]
     fn command_action_reports_queries_and_navigation_detail() {
@@ -260,6 +343,58 @@ mod tests {
             let commands: SearchCommands =
                 serde_json::from_str(arguments).expect("valid search command arguments");
             assert_eq!(command_action(&commands), expected);
+        }
+    }
+
+    #[test]
+    fn parse_search_commands_accepts_lenient_query_shapes() {
+        let cases = [
+            (
+                r#""official OpenAI Codex documentation""#,
+                SearchCommands {
+                    search_query: Some(vec![search_query("official OpenAI Codex documentation")]),
+                    ..Default::default()
+                },
+            ),
+            (
+                r#"{"search_query":"official OpenAI Codex documentation"}"#,
+                SearchCommands {
+                    search_query: Some(vec![search_query("official OpenAI Codex documentation")]),
+                    ..Default::default()
+                },
+            ),
+            (
+                r#"{"search_query":["official OpenAI Codex documentation","OpenAI Codex CLI"]}"#,
+                SearchCommands {
+                    search_query: Some(vec![
+                        search_query("official OpenAI Codex documentation"),
+                        search_query("OpenAI Codex CLI"),
+                    ]),
+                    ..Default::default()
+                },
+            ),
+            (
+                r#"{"image_query":"OpenAI Codex screenshot"}"#,
+                SearchCommands {
+                    image_query: Some(vec![search_query("OpenAI Codex screenshot")]),
+                    ..Default::default()
+                },
+            ),
+        ];
+
+        for (arguments, expected) in cases {
+            assert_eq!(
+                parse_search_commands(arguments).expect("lenient search command arguments"),
+                expected
+            );
+        }
+    }
+
+    fn search_query(query: &str) -> SearchQuery {
+        SearchQuery {
+            q: query.to_string(),
+            recency: None,
+            domains: None,
         }
     }
 }
