@@ -21,6 +21,7 @@ use codex_protocol::config_types::WebSearchContextSize;
 use codex_protocol::config_types::WebSearchMode;
 
 use crate::tool::WebSearchTool;
+use crate::tool::WebSearchToolPresentation;
 
 #[derive(Clone)]
 struct WebSearchExtension {
@@ -29,39 +30,49 @@ struct WebSearchExtension {
 
 #[derive(Clone)]
 struct WebSearchExtensionConfig {
-    available: bool,
-    provider: ModelProviderInfo,
+    search_backend: Option<SearchBackend>,
     settings: SearchSettings,
+}
+
+#[derive(Clone)]
+struct SearchBackend {
+    provider: ModelProviderInfo,
+    presentation: WebSearchToolPresentation,
 }
 
 impl From<&Config> for WebSearchExtensionConfig {
     fn from(config: &Config) -> Self {
         let web_search_mode = config.web_search_mode.value();
-        let provider = search_provider_for_model_provider(&config.model_provider, web_search_mode);
         Self {
             // Core selects this executor per turn using the feature flag, model metadata,
             // or the local OSS provider bridge.
-            available: provider.is_some(),
-            provider: provider.unwrap_or_else(|| config.model_provider.clone()),
+            search_backend: search_backend_for_model_provider(
+                &config.model_provider,
+                web_search_mode,
+            ),
             settings: search_settings(config, web_search_mode),
         }
     }
 }
 
-fn search_provider_for_model_provider(
+fn search_backend_for_model_provider(
     model_provider: &ModelProviderInfo,
     web_search_mode: WebSearchMode,
-) -> Option<ModelProviderInfo> {
+) -> Option<SearchBackend> {
     if web_search_mode == WebSearchMode::Disabled {
         return None;
     }
 
     if model_provider.is_openai() {
-        Some(model_provider.clone())
+        Some(SearchBackend {
+            provider: model_provider.clone(),
+            presentation: WebSearchToolPresentation::Namespace,
+        })
     } else if model_provider.is_oss() {
-        Some(ModelProviderInfo::create_openai_provider(
-            /*base_url*/ None,
-        ))
+        Some(SearchBackend {
+            provider: ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+            presentation: WebSearchToolPresentation::Function,
+        })
     } else {
         None
     }
@@ -135,17 +146,18 @@ impl ToolContributor for WebSearchExtension {
         let Some(config) = thread_store.get::<WebSearchExtensionConfig>() else {
             return Vec::new();
         };
-        if !config.available {
+        let Some(search_backend) = &config.search_backend else {
             return Vec::new();
-        }
+        };
 
         vec![Arc::new(WebSearchTool {
             session_id: session_store.level_id().to_string(),
             provider: create_model_provider(
-                config.provider.clone(),
+                search_backend.provider.clone(),
                 Some(self.auth_manager.clone()),
             ),
             settings: config.settings.clone(),
+            presentation: search_backend.presentation,
         })]
     }
 }
@@ -170,11 +182,13 @@ mod tests {
 
     use super::AuthManager;
     use super::Config;
+    use super::SearchBackend;
     use super::WebSearchExtensionConfig;
     use super::install;
-    use super::search_provider_for_model_provider;
+    use super::search_backend_for_model_provider;
     use crate::tool::RUN_TOOL_NAME;
     use crate::tool::WEB_NAMESPACE;
+    use crate::tool::WEB_SEARCH_TOOL_NAME;
 
     #[test]
     fn installed_extension_contributes_web_run_when_enabled() {
@@ -187,8 +201,10 @@ mod tests {
         let session_store = ExtensionData::new("session");
         let thread_store = ExtensionData::new("11111111-1111-4111-8111-111111111111");
         thread_store.insert(WebSearchExtensionConfig {
-            available: true,
-            provider: ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+            search_backend: Some(SearchBackend {
+                provider: ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+                presentation: crate::tool::WebSearchToolPresentation::Namespace,
+            }),
             settings: Default::default(),
         });
 
@@ -206,17 +222,52 @@ mod tests {
     }
 
     #[test]
+    fn installed_extension_contributes_plain_web_search_for_oss_bridge() {
+        let mut builder = ExtensionRegistryBuilder::<Config>::new();
+        install(
+            &mut builder,
+            AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy")),
+        );
+        let registry = builder.build();
+        let session_store = ExtensionData::new("session");
+        let thread_store = ExtensionData::new("11111111-1111-4111-8111-111111111111");
+        thread_store.insert(WebSearchExtensionConfig {
+            search_backend: Some(SearchBackend {
+                provider: ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+                presentation: crate::tool::WebSearchToolPresentation::Function,
+            }),
+            settings: Default::default(),
+        });
+
+        let tool_names = registry
+            .tool_contributors()
+            .iter()
+            .flat_map(|contributor| contributor.tools(&session_store, &thread_store))
+            .map(|tool| (tool.tool_name(), tool.supports_parallel_tool_calls()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            tool_names,
+            vec![(ToolName::plain(WEB_SEARCH_TOOL_NAME), true)]
+        );
+    }
+
+    #[test]
     fn oss_provider_uses_openai_search_backend() {
         let model_provider = codex_model_provider_info::create_oss_provider_with_base_url(
             "http://localhost:11434/v1",
             WireApi::Responses,
         );
 
-        let search_provider =
-            search_provider_for_model_provider(&model_provider, WebSearchMode::Live)
+        let search_backend =
+            search_backend_for_model_provider(&model_provider, WebSearchMode::Live)
                 .expect("OSS providers should bridge standalone web search through OpenAI");
 
-        assert!(search_provider.is_openai());
+        assert!(search_backend.provider.is_openai());
+        assert_eq!(
+            search_backend.presentation,
+            crate::tool::WebSearchToolPresentation::Function
+        );
     }
 
     #[test]
@@ -227,7 +278,7 @@ mod tests {
         );
 
         assert!(
-            search_provider_for_model_provider(&model_provider, WebSearchMode::Disabled).is_none()
+            search_backend_for_model_provider(&model_provider, WebSearchMode::Disabled).is_none()
         );
     }
 }

@@ -312,6 +312,31 @@ impl ToolExecutor<ExtensionToolCall> for WebRunExtensionTool {
     }
 }
 
+struct PlainWebSearchExtensionTool;
+
+impl ToolExecutor<ExtensionToolCall> for PlainWebSearchExtensionTool {
+    fn tool_name(&self) -> ToolName {
+        ToolName::plain("web_search")
+    }
+
+    fn spec(&self) -> ToolSpec {
+        ToolSpec::Function(ResponsesApiTool {
+            name: "web_search".to_string(),
+            description: "Test standalone web search tool.".to_string(),
+            strict: false,
+            defer_loading: None,
+            parameters: codex_tools::JsonSchema::default(),
+            output_schema: None,
+        })
+    }
+
+    fn handle(&self, _call: ExtensionToolCall) -> codex_tools::ToolExecutorFuture<'_> {
+        Box::pin(async {
+            Ok(Box::new(codex_tools::JsonToolOutput::new(json!({}))) as Box<dyn ToolOutput>)
+        })
+    }
+}
+
 struct DeferredExtensionTool;
 
 impl ToolExecutor<ExtensionToolCall> for DeferredExtensionTool {
@@ -1530,15 +1555,15 @@ async fn hosted_tools_follow_provider_auth_model_and_config_gates() {
             use_ollama_provider(turn);
         },
         ToolPlanInputs {
-            extension_tool_executors: vec![Arc::new(WebRunExtensionTool)],
+            extension_tool_executors: vec![Arc::new(PlainWebSearchExtensionTool)],
             ..Default::default()
         },
     )
     .await;
-    oss_standalone_web_search.assert_visible_lacks(&["web_search"]);
-    oss_standalone_web_search.assert_visible_contains(&["web"]);
-    assert_eq!(
-        oss_standalone_web_search.namespace_function_names("web"),
-        &["run".to_string()]
-    );
+    let ToolSpec::Function(ResponsesApiTool { name, .. }) =
+        oss_standalone_web_search.visible_spec("web_search")
+    else {
+        panic!("expected OSS standalone search to be exposed as a function tool");
+    };
+    assert_eq!(name, "web_search");
 }

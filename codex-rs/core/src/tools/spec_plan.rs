@@ -299,7 +299,7 @@ fn hosted_model_tool_specs(context: &CoreToolPlanContext<'_>) -> Vec<ToolSpec> {
         && context
             .extension_tool_executors
             .iter()
-            .any(|executor| executor.tool_name() == ToolName::namespaced("web", "run"));
+            .any(|executor| is_standalone_web_search_tool_name(&executor.tool_name()));
     // `Some(Cached/Live/Disabled)` are the options for mode when standalone search is unavailable
     // and the provider supports hosted search. `None` prevents emitting a hosted search tool.
     let web_search_mode = (!standalone_web_search_available
@@ -1000,7 +1000,7 @@ fn append_extension_tool_executors(
 
     for executor in executors.iter().cloned() {
         let tool_name = executor.tool_name();
-        if tool_name == ToolName::namespaced("web", "run")
+        if is_standalone_web_search_tool_name(&tool_name)
             && (!standalone_web_search_enabled || !web_search_mode_on)
         {
             continue;
@@ -1016,6 +1016,10 @@ fn append_extension_tool_executors(
         }
         planned_tools.add(ExtensionToolAdapter::new(executor));
     }
+}
+
+fn is_standalone_web_search_tool_name(tool_name: &ToolName) -> bool {
+    tool_name == &ToolName::namespaced("web", "run") || tool_name == &ToolName::plain("web_search")
 }
 
 fn multi_agent_v2_handler(

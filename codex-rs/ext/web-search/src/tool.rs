@@ -31,38 +31,45 @@ use crate::schema::commands_schema;
 
 pub(crate) const WEB_NAMESPACE: &str = "web";
 pub(crate) const RUN_TOOL_NAME: &str = "run";
+pub(crate) const WEB_SEARCH_TOOL_NAME: &str = "web_search";
 const WEB_RUN_DESCRIPTION: &str = include_str!("../web_run_description.md");
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WebSearchToolPresentation {
+    Namespace,
+    Function,
+}
 
 pub(crate) struct WebSearchTool {
     pub(crate) session_id: String,
     pub(crate) provider: SharedModelProvider,
     pub(crate) settings: SearchSettings,
+    pub(crate) presentation: WebSearchToolPresentation,
 }
 
 impl ToolExecutor<ToolCall> for WebSearchTool {
     fn tool_name(&self) -> ToolName {
-        ToolName::namespaced(WEB_NAMESPACE, RUN_TOOL_NAME)
+        match self.presentation {
+            WebSearchToolPresentation::Namespace => {
+                ToolName::namespaced(WEB_NAMESPACE, RUN_TOOL_NAME)
+            }
+            WebSearchToolPresentation::Function => ToolName::plain(WEB_SEARCH_TOOL_NAME),
+        }
     }
 
     fn spec(&self) -> ToolSpec {
-        // parse schema without compaction that removes field metadata/descriptions to match hosted tool definition
-        let parameters = match parse_tool_input_schema_without_compaction(&commands_schema()) {
-            Ok(parameters) => parameters,
-            Err(err) => panic!("search command schema should parse: {err}"),
-        };
-
-        ToolSpec::Namespace(ResponsesApiNamespace {
-            name: WEB_NAMESPACE.to_string(),
-            description: default_namespace_description(WEB_NAMESPACE),
-            tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
-                name: RUN_TOOL_NAME.to_string(),
-                description: WEB_RUN_DESCRIPTION.to_string(),
-                strict: false,
-                parameters,
-                output_schema: None,
-                defer_loading: None,
-            })],
-        })
+        match self.presentation {
+            WebSearchToolPresentation::Namespace => ToolSpec::Namespace(ResponsesApiNamespace {
+                name: WEB_NAMESPACE.to_string(),
+                description: default_namespace_description(WEB_NAMESPACE),
+                tools: vec![ResponsesApiNamespaceTool::Function(responses_api_tool(
+                    RUN_TOOL_NAME,
+                ))],
+            }),
+            WebSearchToolPresentation::Function => {
+                ToolSpec::Function(responses_api_tool(WEB_SEARCH_TOOL_NAME))
+            }
+        }
     }
 
     fn exposure(&self) -> ToolExposure {
@@ -75,6 +82,23 @@ impl ToolExecutor<ToolCall> for WebSearchTool {
 
     fn handle(&self, call: ToolCall) -> codex_extension_api::ToolExecutorFuture<'_> {
         Box::pin(self.handle_call(call))
+    }
+}
+
+fn responses_api_tool(name: &str) -> ResponsesApiTool {
+    // Parse schema without compaction that removes field metadata/descriptions to match hosted tool definition.
+    let parameters = match parse_tool_input_schema_without_compaction(&commands_schema()) {
+        Ok(parameters) => parameters,
+        Err(err) => panic!("search command schema should parse: {err}"),
+    };
+
+    ResponsesApiTool {
+        name: name.to_string(),
+        description: WEB_RUN_DESCRIPTION.to_string(),
+        strict: false,
+        parameters,
+        output_schema: None,
+        defer_loading: None,
     }
 }
 
