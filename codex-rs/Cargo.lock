@@ -4380,6 +4380,7 @@ dependencies = [
  "codex-tools",
  "http 1.4.0",
  "pretty_assertions",
+ "reqwest 0.12.28",
  "schemars 0.8.22",
  "serde_json",
  "url",

@@ -20,7 +20,9 @@ use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::config_types::WebSearchContextSize;
 use codex_protocol::config_types::WebSearchMode;
 
+use crate::local::LocalSearchBackend;
 use crate::tool::WebSearchTool;
+use crate::tool::WebSearchToolBackend;
 use crate::tool::WebSearchToolPresentation;
 
 #[derive(Clone)]
@@ -36,8 +38,14 @@ struct WebSearchExtensionConfig {
 
 #[derive(Clone)]
 struct SearchBackend {
-    provider: ModelProviderInfo,
+    executor: SearchBackendExecutor,
     presentation: WebSearchToolPresentation,
+}
+
+#[derive(Clone)]
+enum SearchBackendExecutor {
+    Hosted(Box<ModelProviderInfo>),
+    LocalHttp(LocalSearchBackend),
 }
 
 impl From<&Config> for WebSearchExtensionConfig {
@@ -65,12 +73,12 @@ fn search_backend_for_model_provider(
 
     if model_provider.is_openai() {
         Some(SearchBackend {
-            provider: model_provider.clone(),
+            executor: SearchBackendExecutor::Hosted(Box::new(model_provider.clone())),
             presentation: WebSearchToolPresentation::Namespace,
         })
     } else if model_provider.is_oss() {
         Some(SearchBackend {
-            provider: ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+            executor: SearchBackendExecutor::LocalHttp(LocalSearchBackend::from_env()),
             presentation: WebSearchToolPresentation::Function,
         })
     } else {
@@ -152,10 +160,14 @@ impl ToolContributor for WebSearchExtension {
 
         vec![Arc::new(WebSearchTool {
             session_id: session_store.level_id().to_string(),
-            provider: create_model_provider(
-                search_backend.provider.clone(),
-                Some(self.auth_manager.clone()),
-            ),
+            backend: match &search_backend.executor {
+                SearchBackendExecutor::Hosted(provider) => WebSearchToolBackend::Hosted(
+                    create_model_provider((**provider).clone(), Some(self.auth_manager.clone())),
+                ),
+                SearchBackendExecutor::LocalHttp(backend) => {
+                    WebSearchToolBackend::LocalHttp(backend.clone())
+                }
+            },
             settings: config.settings.clone(),
             presentation: search_backend.presentation,
         })]
@@ -182,7 +194,9 @@ mod tests {
 
     use super::AuthManager;
     use super::Config;
+    use super::LocalSearchBackend;
     use super::SearchBackend;
+    use super::SearchBackendExecutor;
     use super::WebSearchExtensionConfig;
     use super::install;
     use super::search_backend_for_model_provider;
@@ -202,7 +216,9 @@ mod tests {
         let thread_store = ExtensionData::new("11111111-1111-4111-8111-111111111111");
         thread_store.insert(WebSearchExtensionConfig {
             search_backend: Some(SearchBackend {
-                provider: ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+                executor: SearchBackendExecutor::Hosted(Box::new(
+                    ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+                )),
                 presentation: crate::tool::WebSearchToolPresentation::Namespace,
             }),
             settings: Default::default(),
@@ -233,7 +249,9 @@ mod tests {
         let thread_store = ExtensionData::new("11111111-1111-4111-8111-111111111111");
         thread_store.insert(WebSearchExtensionConfig {
             search_backend: Some(SearchBackend {
-                provider: ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+                executor: SearchBackendExecutor::LocalHttp(LocalSearchBackend::new(
+                    "http://127.0.0.1:8765",
+                )),
                 presentation: crate::tool::WebSearchToolPresentation::Function,
             }),
             settings: Default::default(),
@@ -253,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn oss_provider_uses_openai_search_backend() {
+    fn oss_provider_uses_local_search_backend() {
         let model_provider = codex_model_provider_info::create_oss_provider_with_base_url(
             "http://localhost:11434/v1",
             WireApi::Responses,
@@ -261,9 +279,14 @@ mod tests {
 
         let search_backend =
             search_backend_for_model_provider(&model_provider, WebSearchMode::Live)
-                .expect("OSS providers should bridge standalone web search through OpenAI");
+                .expect("OSS providers should bridge standalone web search through local search");
 
-        assert!(search_backend.provider.is_openai());
+        match search_backend.executor {
+            SearchBackendExecutor::LocalHttp(backend) => {
+                assert_eq!(backend.base_url(), crate::local::DEFAULT_LOCAL_SEARCH_URL);
+            }
+            SearchBackendExecutor::Hosted(_) => panic!("expected local search backend"),
+        }
         assert_eq!(
             search_backend.presentation,
             crate::tool::WebSearchToolPresentation::Function

@@ -27,6 +27,7 @@ use serde_json::Value;
 use url::Url;
 
 use crate::history::recent_input;
+use crate::local::LocalSearchBackend;
 use crate::output::SearchOutput;
 use crate::schema::commands_schema;
 
@@ -43,9 +44,14 @@ pub(crate) enum WebSearchToolPresentation {
 
 pub(crate) struct WebSearchTool {
     pub(crate) session_id: String,
-    pub(crate) provider: SharedModelProvider,
+    pub(crate) backend: WebSearchToolBackend,
     pub(crate) settings: SearchSettings,
     pub(crate) presentation: WebSearchToolPresentation,
+}
+
+pub(crate) enum WebSearchToolBackend {
+    Hosted(SharedModelProvider),
+    LocalHttp(LocalSearchBackend),
 }
 
 impl ToolExecutor<ToolCall> for WebSearchTool {
@@ -107,21 +113,6 @@ impl WebSearchTool {
     async fn handle_call(&self, call: ToolCall) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
         let commands = parse_commands(&call)?;
         let command_action = command_action(&commands);
-        let provider = self
-            .provider
-            .api_provider()
-            .await
-            .map_err(|err| FunctionCallError::Fatal(err.to_string()))?;
-        let auth = self
-            .provider
-            .api_auth()
-            .await
-            .map_err(|err| FunctionCallError::Fatal(err.to_string()))?;
-        let client = SearchClient::new(
-            ReqwestTransport::new(build_reqwest_client()),
-            provider,
-            auth,
-        );
         let request = SearchRequest {
             id: self.session_id.clone(),
             model: call.model.clone(),
@@ -136,16 +127,47 @@ impl WebSearchTool {
         call.turn_item_emitter
             .emit_started(web_search_item(&call.call_id, WebSearchAction::Other))
             .await;
-        let response = client
-            .search(&request, HeaderMap::new())
-            .await
-            .map_err(|err| FunctionCallError::Fatal(err.to_string()))?;
+        let output = self.search(&request).await?;
         call.turn_item_emitter
             .emit_completed(web_search_item(&call.call_id, command_action))
             .await;
 
-        Ok(Box::new(SearchOutput::new(response.output)))
+        Ok(Box::new(SearchOutput::new(output)))
     }
+
+    async fn search(&self, request: &SearchRequest) -> Result<String, FunctionCallError> {
+        match &self.backend {
+            WebSearchToolBackend::Hosted(provider) => hosted_search(provider, request).await,
+            WebSearchToolBackend::LocalHttp(backend) => backend
+                .search(request)
+                .await
+                .map_err(FunctionCallError::RespondToModel),
+        }
+    }
+}
+
+async fn hosted_search(
+    provider: &SharedModelProvider,
+    request: &SearchRequest,
+) -> Result<String, FunctionCallError> {
+    let provider_info = provider
+        .api_provider()
+        .await
+        .map_err(|err| FunctionCallError::Fatal(err.to_string()))?;
+    let auth = provider
+        .api_auth()
+        .await
+        .map_err(|err| FunctionCallError::Fatal(err.to_string()))?;
+    let client = SearchClient::new(
+        ReqwestTransport::new(build_reqwest_client()),
+        provider_info,
+        auth,
+    );
+    let response = client
+        .search(request, HeaderMap::new())
+        .await
+        .map_err(|err| FunctionCallError::Fatal(err.to_string()))?;
+    Ok(response.output)
 }
 
 fn parse_commands(call: &ToolCall) -> Result<SearchCommands, FunctionCallError> {
