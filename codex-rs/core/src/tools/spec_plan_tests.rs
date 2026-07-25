@@ -8,6 +8,7 @@ use codex_mcp::ToolInfo;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::openai_models::ApplyPatchToolType;
@@ -275,6 +276,21 @@ fn use_bedrock_provider(turn: &mut TurnContext) {
     let provider_info = ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None);
     update_config(turn, |config| {
         config.model_provider_id = AMAZON_BEDROCK_PROVIDER_ID.to_string();
+        config.model_provider = provider_info.clone();
+    });
+    turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
+}
+
+fn use_ollama_provider(turn: &mut TurnContext, supports_standalone_web_search: bool) {
+    let mut provider_info = turn
+        .config
+        .model_providers
+        .get(OLLAMA_OSS_PROVIDER_ID)
+        .cloned()
+        .expect("built-in ollama provider should exist");
+    provider_info.supports_standalone_web_search = supports_standalone_web_search;
+    update_config(turn, |config| {
+        config.model_provider_id = OLLAMA_OSS_PROVIDER_ID.to_string();
         config.model_provider = provider_info.clone();
     });
     turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
@@ -1924,4 +1940,29 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
     })
     .await;
     unsupported_provider.assert_visible_lacks(&["web_search"]);
+
+    let ollama_provider = probe(|turn| {
+        set_web_search_mode(turn, WebSearchMode::Live);
+        use_ollama_provider(turn, /*supports_standalone_web_search*/ false);
+    })
+    .await;
+    ollama_provider.assert_visible_lacks(&["web_search"]);
+
+    let opted_in_ollama_provider = probe_with(
+        |turn| {
+            set_feature(turn, Feature::StandaloneWebSearch, /*enabled*/ true);
+            set_web_search_mode(turn, WebSearchMode::Live);
+            use_ollama_provider(turn, /*supports_standalone_web_search*/ true);
+        },
+        ToolPlanInputs {
+            extension_tool_executors: vec![Arc::new(TestNamespaceExtensionTool {
+                namespace: "web",
+                tool_name: "run",
+            })],
+            ..Default::default()
+        },
+    )
+    .await;
+    opted_in_ollama_provider.assert_visible_contains(&["web"]);
+    opted_in_ollama_provider.assert_visible_lacks(&["web_search"]);
 }
